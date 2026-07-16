@@ -174,8 +174,9 @@ class BaseDataset(Dataset):
                         # F += [p.parent / x.lstrip(os.sep) for x in t]  # local to global (pathlib)
                 else:
                     raise FileNotFoundError(f"{self.prefix}{p} does not exist")
-            im_files = sorted(x.replace("/", os.sep) for x in f if x.rpartition(".")[-1].lower() in IMG_FORMATS)
-            # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
+            valid_formats = {*IMG_FORMATS, "npy"}
+            im_files = sorted(x.replace("/", os.sep) for x in f if x.rpartition(".")[-1].lower() in valid_formats)
+            # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in valid_formats])  # pathlib
             assert im_files, f"{self.prefix}No images found in {img_path}. {FORMATS_HELP_MSG}"
         except Exception as e:
             raise FileNotFoundError(f"{self.prefix}Error loading data from {img_path}\n{HELP_URL}") from e
@@ -233,14 +234,14 @@ class BaseDataset(Dataset):
                     im = np.load(fn)
                     npy_channels = im.shape[-1] if im.ndim >= 3 else 1
                     if npy_channels != self.channels:
-                        LOGGER.warning(
-                            f"{self.prefix}Removing stale *.npy image file {fn} with {npy_channels} channels, expected {self.channels}"
+                        raise ValueError(
+                            f"{self.prefix}*.npy image file {fn} has {npy_channels} channels, expected {self.channels}"
                         )
-                        Path(fn).unlink(missing_ok=True)
-                        im = imread(f, flags=self.cv2_flag)
                 except Exception as e:
                     LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn} due to: {e}")
                     Path(fn).unlink(missing_ok=True)
+                    if f.lower().endswith(".npy"):
+                        raise FileNotFoundError(f"Image Not Found {f}") from e
                     im = imread(f, flags=self.cv2_flag)  # BGR
             else:  # read image
                 im = imread(f, flags=self.cv2_flag)  # BGR
@@ -253,6 +254,7 @@ class BaseDataset(Dataset):
                     r = self.imgsz / min(h0, w0)  # ratio
                     if r != 1:  # if sizes are not equal
                         w, h = (math.ceil(w0 * r), self.imgsz) if h0 < w0 else (self.imgsz, math.ceil(h0 * r))
+                        # For multi-channel images, cv2.resize needs (w, h) as target size
                         im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
                 else:
                     r = self.imgsz / max(h0, w0)  # ratio
@@ -261,7 +263,10 @@ class BaseDataset(Dataset):
                         im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
             elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
                 im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
-            if im.ndim == 2:
+            
+            # Only convert 2D (grayscale) to 3D if not multi-channel format
+            # For 6-channel images from concatenated VIS-IR, skip this conversion
+            if im.ndim == 2 and self.channels <= 3:
                 im = im[..., None]
 
             # Add to buffer if training with augmentations
@@ -286,7 +291,10 @@ class BaseDataset(Dataset):
             pbar = TQDM(enumerate(results), total=self.ni, disable=LOCAL_RANK > 0)
             for i, x in pbar:
                 if self.cache == "disk":
-                    b += self.npy_files[i].stat().st_size
+                    if self.im_files[i].lower().endswith(".npy"):
+                        b += Path(self.im_files[i]).stat().st_size
+                    else:
+                        b += self.npy_files[i].stat().st_size
                 else:  # 'ram'
                     self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
                     b += self.ims[i].nbytes
@@ -296,6 +304,8 @@ class BaseDataset(Dataset):
     def cache_images_to_disk(self, i: int) -> None:
         """Save an image as an *.npy file for faster loading."""
         f = self.npy_files[i]
+        if self.im_files[i].lower().endswith(".npy"):
+            return
         if not f.exists():
             try:
                 np.save(f.as_posix(), imread(self.im_files[i], flags=self.cv2_flag), allow_pickle=False)
@@ -318,10 +328,13 @@ class BaseDataset(Dataset):
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
             im_file = random.choice(self.im_files)
-            im = imread(im_file)
-            if im is None:
-                continue
-            b += im.nbytes
+            if im_file.lower().endswith(".npy"):
+                b += Path(im_file).stat().st_size
+            else:
+                im = imread(im_file)
+                if im is None:
+                    continue
+                b += im.nbytes
             if not os.access(Path(im_file).parent, os.W_OK):
                 self.cache = None
                 LOGGER.warning(f"{self.prefix}Skipping caching images to disk, directory not writable")

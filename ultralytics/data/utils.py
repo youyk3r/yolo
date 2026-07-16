@@ -181,6 +181,19 @@ def check_image(im_file: str) -> tuple[str, tuple[int, int]]:
         AssertionError: If the image size is less than 10 pixels in any dimension or the format is invalid.
     """
     msg = ""
+    
+    # Handle .npy files (6-channel multi-spectral data)
+    if im_file.lower().endswith(".npy"):
+        import numpy as np
+        try:
+            im = np.load(im_file)
+            assert im.ndim in {2, 3}, f"Invalid .npy shape {im.shape}, expected (H,W) or (H,W,C)"
+            shape = im.shape[:2]  # (height, width)
+            assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+            return msg, shape
+        except Exception as e:
+            raise AssertionError(f"Invalid .npy file {im_file}: {e}") from e
+    
     im = Image.open(im_file)
     im.verify()  # PIL verify
     shape = exif_size(im)  # image size
