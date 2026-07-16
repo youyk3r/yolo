@@ -427,7 +427,7 @@ def _initialize_yolo_model(model, cfg, ch, nc, verbose):
         )
         model.yaml["backbone"][0][2] = "nn.Identity"
 
-    model.yaml["channels"] = ch  # save channels
+    ch = model.yaml["channels"] = model.yaml.get("channels", ch)  # input channels
     if nc and nc != model.yaml["nc"]:
         LOGGER.info(f"Overriding model.yaml nc={model.yaml['nc']} with nc={nc}")
         model.yaml["nc"] = nc  # override YAML value
@@ -475,6 +475,7 @@ class DetectionModel(BaseModel):
         """
         super().__init__()
         _initialize_yolo_model(self, cfg, ch, nc, verbose)
+        ch = self.yaml["channels"]
 
         # Build strides
         m = self.model[-1]  # Detect()
@@ -686,6 +687,7 @@ class SemanticSegmentationModel(BaseModel):
         """
         super().__init__()
         _initialize_yolo_model(self, cfg, ch, nc, verbose)
+        ch = self.yaml["channels"]
 
         # Build strides: track smallest spatial size across all layers to find the deepest
         # backbone stride (e.g. P5/32). Head input alone is insufficient: the FPN upsamples

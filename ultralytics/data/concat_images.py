@@ -62,8 +62,8 @@ def concat_vis_ir(
         raise FileNotFoundError(f"IR image not found: {ir_path}")
 
     # Read images
-    vis = imread(vis_path, flags=cv2.IMREAD_COLOR)  # BGR, shape (H, W, 3)
-    ir = imread(ir_path, flags=cv2.IMREAD_GRAYSCALE)  # grayscale, shape (H, W)
+    vis = imread(str(vis_path), flags=cv2.IMREAD_COLOR)  # BGR, shape (H, W, 3)
+    ir = imread(str(ir_path), flags=cv2.IMREAD_GRAYSCALE)  # grayscale, shape (H, W)
 
     if vis is None:
         raise ValueError(f"Failed to read VIS image: {vis_path}")
@@ -118,6 +118,7 @@ def batch_concat_vis_ir(
     target_size: Tuple[int, int] | None = None,
     ir_to_3ch: bool = True,
     save_mode: str = "npy",
+    name_suffix: str = "_fused",
     prefix: str = "",
 ) -> list[Path]:
     """Batch process multiple VIS-IR image pairs.
@@ -129,6 +130,8 @@ def batch_concat_vis_ir(
         target_size (Tuple[int, int] | None): Target (height, width). Default: None.
         ir_to_3ch (bool): Replicate single-channel IR to 3 channels. Default: True.
         save_mode (str): Format to save ('npy' or 'npz'). Default: 'npy'.
+        name_suffix (str): Suffix appended to each VIS stem before the file extension. Use an empty string to preserve
+            source stems, e.g. '00000.npy' for direct YOLO label matching. Default: '_fused'.
         prefix (str): Prefix for logging. Default: "".
 
     Returns:
@@ -147,7 +150,7 @@ def batch_concat_vis_ir(
     for i, (vis_path, ir_path) in enumerate(zip(vis_paths, ir_paths)):
         try:
             vis_path = Path(vis_path)
-            output_path = output_dir / f"{vis_path.stem}_fused.{save_mode.lower()}"
+            output_path = output_dir / f"{vis_path.stem}{name_suffix}.{save_mode.lower()}"
             concat_vis_ir(vis_path, ir_path, output_path, target_size, ir_to_3ch, save_mode)
             output_paths.append(output_path)
         except Exception as e:
