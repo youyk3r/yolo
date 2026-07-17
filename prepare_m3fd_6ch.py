@@ -31,8 +31,8 @@ from ultralytics.data.concat_images import batch_concat_vis_ir
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-DEFAULT_KEEP_CLASSES = [0, 1]
-DEFAULT_NAMES = ["person", "car"]
+DEFAULT_KEEP_CLASSES = [0, 1, 2, 3, 4, 5]
+DEFAULT_NAMES = ["People", "Car", "Bus", "Motorcycle", "Lamp", "Truck"]
 
 
 def parse_args() -> argparse.Namespace:
