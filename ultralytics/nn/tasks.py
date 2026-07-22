@@ -47,6 +47,7 @@ from ultralytics.nn.modules import (
     Detect,
     DWConv,
     DWConvTranspose2d,
+    DualInputBackbone,
     Focus,
     GhostBottleneck,
     GhostConv,

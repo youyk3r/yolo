@@ -21,7 +21,7 @@ The most common agent failure in this repo is reaching for the locally-safest ed
 
 **This file is code — additions require deletions.** To add a rule here, remove or merge one. When everything is emphasized, nothing is.
 
-**NEVER push to `main`. NEVER force push.** Always start work in a new git worktree (`git worktree add`) on a feature branch and open a PR — never edit the primary checkout directly, it may hold in-flight work.
+**NEVER push to `main`. NEVER force push.** Work in the current checkout unless a separate worktree is explicitly requested.
 
 ## PR Workflow
 
