@@ -25,7 +25,7 @@ class DualInputBackbone(nn.Module):
         p4_channels: int = 128,
         p5_channels: int = 256,
         use_cbam: bool = False,
-        cbam_kernel_size: int = 7,
+        cbam_kernel_size: int = 3,
     ):
         """Initialize the dual-branch backbone."""
         super().__init__()
@@ -35,9 +35,9 @@ class DualInputBackbone(nn.Module):
             raise ValueError("p3_channels must be an even integer of at least 16")
 
         # RGB 分支：只处理输入张量的前 3 个通道，逐步下采样到 P3/8 尺度。
-        self.rgb_stem = self._make_stem(branch_channels, use_cbam, cbam_kernel_size)
+        self.rgb_stem = self._make_stem(branch_channels)
         # IR 分支：结构和 RGB 分支一致，但参数独立，用来学习红外模态特征。
-        self.ir_stem = self._make_stem(branch_channels, use_cbam, cbam_kernel_size)
+        self.ir_stem = self._make_stem(branch_channels)
         # 在 P3 尺度把 RGB/IR 特征拼接后，先用 1x1 卷积混合通道，再用 CBAM 做跨模态特征筛选。
         self.fuse = nn.Sequential(
             Conv(p3_channels, p3_channels, 1, 1),
@@ -47,13 +47,11 @@ class DualInputBackbone(nn.Module):
         self.p4 = nn.Sequential(
             Conv(p3_channels, p4_channels, 3, 2),
             C2f(p4_channels, p4_channels, n=2, shortcut=True),
-            self._make_attention(p4_channels, use_cbam, cbam_kernel_size),
         )
         # 继续下采样生成 P5/32 特征，并接 SPPF 增强大感受野。
         self.p5 = nn.Sequential(
             Conv(p4_channels, p5_channels, 3, 2),
             C2f(p5_channels, p5_channels, n=1, shortcut=True),
-            self._make_attention(p5_channels, use_cbam, cbam_kernel_size),
             SPPF(p5_channels, p5_channels, 5),
         )
 
@@ -62,17 +60,15 @@ class DualInputBackbone(nn.Module):
         """Return CBAM when enabled, otherwise an identity layer."""
         return CBAM(channels, kernel_size) if use_cbam else nn.Identity()
 
-    @classmethod
-    def _make_stem(cls, channels: int, use_cbam: bool, cbam_kernel_size: int) -> nn.Sequential:
+    @staticmethod
+    def _make_stem(channels: int) -> nn.Sequential:
         """Build one modality branch from 3-channel input to P3/8 features."""
         return nn.Sequential(
             Conv(3, channels // 4, 3, 2),
             Conv(channels // 4, channels // 2, 3, 2),
             C2f(channels // 2, channels // 2, n=1, shortcut=True),
-            cls._make_attention(channels // 2, use_cbam, cbam_kernel_size),
             Conv(channels // 2, channels, 3, 2),
             C2f(channels, channels, n=1, shortcut=True),
-            cls._make_attention(channels, use_cbam, cbam_kernel_size),
         )
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:

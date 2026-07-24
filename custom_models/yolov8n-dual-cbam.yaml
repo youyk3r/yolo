@@ -4,9 +4,9 @@ nc: 80
 channels: 6
 scale: n
 
-# Args: [P3 channels, P4 channels, P5 channels, use CBAM, CBAM spatial kernel size]
+# Args: [P3 channels, P4 channels, P5 channels, use fusion CBAM, CBAM spatial kernel size]
 backbone:
-  - [-1, 1, DualInputBackbone, [64, 128, 256, True, 7]]
+  - [-1, 1, DualInputBackbone, [64, 128, 256, True, 3]]
   - [0, 1, Index, [64, 0]]
   - [0, 1, Index, [128, 1]]
   - [0, 1, Index, [256, 2]]
