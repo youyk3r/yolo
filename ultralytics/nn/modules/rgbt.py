@@ -16,7 +16,7 @@ class AFF(nn.Module):
     """Attentional feature fusion for two same-scale modality features."""
 
     def __init__(self, channels: int, out_channels: int, reduction: int = 4):
-        """Initialize AFF with local/global attention and an output projection."""
+        """Initialize AFF with local/global attention and a concat projection."""
         super().__init__()
         hidden_channels = max(channels // reduction, 8)
         self.local_att = nn.Sequential(
@@ -31,13 +31,13 @@ class AFF(nn.Module):
             nn.Conv2d(hidden_channels, channels, 1, bias=True),
         )
         self.act = nn.Sigmoid()
-        self.project = Conv(channels, out_channels, 1, 1)
+        self.project = Conv(channels * 2, out_channels, 1, 1)
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
-        """Fuse RGB and infrared features with adaptive modality weights."""
+        """Weight each modality adaptively, then keep both streams before projection."""
         mixed = rgb + ir
         weights = self.act(self.local_att(mixed) + self.global_att(mixed))
-        return self.project(rgb * weights + ir * (1.0 - weights))
+        return self.project(torch.cat((rgb * weights, ir * (1.0 - weights)), dim=1))
 
 
 class DualInputBackbone(nn.Module):
@@ -66,7 +66,7 @@ class DualInputBackbone(nn.Module):
         self.rgb_stem = self._make_stem(branch_channels)
         # IR 分支：结构和 RGB 分支一致，但参数独立，用来学习红外模态特征。
         self.ir_stem = self._make_stem(branch_channels)
-        # 在 P3 尺度使用 AFF 自适应融合 RGB/IR，直接学习每个位置更应信任哪个模态。
+        # 在 P3 尺度使用 AFF 自适应加权 RGB/IR，再拼接保留两个模态的互补信息。
         self.fuse = AFF(branch_channels, p3_channels, aff_reduction) if use_aff else Conv(p3_channels, p3_channels, 1, 1)
         # 融合后的特征进入共享 backbone，继续生成 P4/16 特征。
         self.p4 = nn.Sequential(
