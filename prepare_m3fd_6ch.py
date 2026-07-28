@@ -29,7 +29,6 @@ from pathlib import Path
 
 from ultralytics.data.concat_images import batch_concat_vis_ir
 
-
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 DEFAULT_KEEP_CLASSES = [0, 1]
 DEFAULT_NAMES = ["person", "car"]
@@ -234,7 +233,9 @@ def main() -> int:
     print(f"Total labels kept/dropped: {train_kept + val_kept}/{train_dropped + val_dropped}")
     print(f"Dataset YAML: {dst_root / 'rgbt6.yaml'}")
     print("Next smoke train command:")
-    print(f"  yolo detect train model=yolov8n-6ch.yaml data={dst_root / 'rgbt6.yaml'} imgsz=640 batch=2 epochs=1 workers=0")
+    print(
+        f"  yolo detect train model=yolov8n-6ch.yaml data={dst_root / 'rgbt6.yaml'} imgsz=640 batch=2 epochs=1 workers=0"
+    )
     return 0
 
 
