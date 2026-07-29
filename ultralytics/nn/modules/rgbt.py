@@ -40,6 +40,21 @@ class AFF(nn.Module):
         return self.project(torch.cat((rgb * weights, ir * (1.0 - weights)), dim=1))
 
 
+class ResidualAFF(nn.Module):
+    """Residual AFF-v2 fusion that preserves the baseline concat path."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1):
+        """Initialize a baseline fusion path plus a learnable AFF residual."""
+        super().__init__()
+        self.base = Conv(channels * 2, out_channels, 1, 1)
+        self.aff = AFF(channels, out_channels, reduction)
+        self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse with Cat + 1x1 Conv as the main path and AFF-v2 as residual enhancement."""
+        return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
+
+
 class DualInputBackbone(nn.Module):
     """Extract multi-scale features from separate RGB and infrared branches.
 
@@ -54,6 +69,8 @@ class DualInputBackbone(nn.Module):
         p5_channels: int = 256,
         use_aff: bool = False,
         aff_reduction: int = 4,
+        residual_aff: bool = False,
+        residual_alpha: float = 0.1,
     ):
         """Initialize the dual-branch backbone."""
         super().__init__()
@@ -66,8 +83,13 @@ class DualInputBackbone(nn.Module):
         self.rgb_stem = self._make_stem(branch_channels)
         # IR 分支：结构和 RGB 分支一致，但参数独立，用来学习红外模态特征。
         self.ir_stem = self._make_stem(branch_channels)
-        # 在 P3 尺度使用 AFF 自适应加权 RGB/IR，再拼接保留两个模态的互补信息。
-        self.fuse = AFF(branch_channels, p3_channels, aff_reduction) if use_aff else Conv(p3_channels, p3_channels, 1, 1)
+        # 在 P3 尺度融合 RGB/IR：baseline 保留 Cat + 1x1 Conv，AFF 版本增加自适应模态权重。
+        if residual_aff:
+            self.fuse = ResidualAFF(branch_channels, p3_channels, aff_reduction, residual_alpha)
+        elif use_aff:
+            self.fuse = AFF(branch_channels, p3_channels, aff_reduction)
+        else:
+            self.fuse = Conv(p3_channels, p3_channels, 1, 1)
         # 融合后的特征进入共享 backbone，继续生成 P4/16 特征。
         self.p4 = nn.Sequential(
             Conv(p3_channels, p4_channels, 3, 2),
@@ -98,8 +120,8 @@ class DualInputBackbone(nn.Module):
         # 输入约定为 6 通道：前 3 通道是可见光 RGB，后 3 通道是红外 IR。
         rgb = self.rgb_stem(x[:, :3])
         ir = self.ir_stem(x[:, 3:6])
-        # AFF 版本直接输入两个模态；普通 dual baseline 则保持 Cat + 1x1 Conv。
-        p3 = self.fuse(rgb, ir) if isinstance(self.fuse, AFF) else self.fuse(torch.cat((rgb, ir), dim=1))
+        # AFF/ResidualAFF 直接输入两个模态；普通 dual baseline 则保持 Cat + 1x1 Conv。
+        p3 = self.fuse(rgb, ir) if isinstance(self.fuse, (AFF, ResidualAFF)) else self.fuse(torch.cat((rgb, ir), dim=1))
         # 基于融合特征继续提取 P4/P5，供 YOLO neck/head 做多尺度检测。
         p4 = self.p4(p3)
         p5 = self.p5(p4)
