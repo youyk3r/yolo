@@ -55,6 +55,50 @@ class ResidualAFF(nn.Module):
         return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
 
 
+class ConcatGatedAFF(nn.Module):
+    """Concat-gated AFF that predicts modality weights from RGB/IR contrast."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4):
+        """Initialize concat-gated AFF with local/global attention and a concat projection."""
+        super().__init__()
+        hidden_channels = max(channels // reduction, 8)
+        gate_channels = channels * 2
+        self.local_att = nn.Sequential(
+            nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, channels, 1, bias=True),
+        )
+        self.global_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, channels, 1, bias=True),
+        )
+        self.act = nn.Sigmoid()
+        self.project = Conv(gate_channels, out_channels, 1, 1)
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Predict modality weights from concatenated RGB/IR features, then project both streams."""
+        mixed = torch.cat((rgb, ir), dim=1)
+        weights = self.act(self.local_att(mixed) + self.global_att(mixed))
+        return self.project(torch.cat((rgb * weights, ir * (1.0 - weights)), dim=1))
+
+
+class ResidualConcatGatedAFF(nn.Module):
+    """Residual concat-gated AFF fusion that preserves the baseline concat path."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1):
+        """Initialize a baseline fusion path plus a learnable concat-gated AFF residual."""
+        super().__init__()
+        self.base = Conv(channels * 2, out_channels, 1, 1)
+        self.aff = ConcatGatedAFF(channels, out_channels, reduction)
+        self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse with Cat + 1x1 Conv as the main path and concat-gated AFF as residual enhancement."""
+        return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
+
+
 class DualInputBackbone(nn.Module):
     """Extract multi-scale features from separate RGB and infrared branches.
 
@@ -71,6 +115,7 @@ class DualInputBackbone(nn.Module):
         aff_reduction: int = 4,
         residual_aff: bool = False,
         residual_alpha: float = 0.1,
+        residual_cgaff: bool = False,
     ):
         """Initialize the dual-branch backbone."""
         super().__init__()
@@ -84,7 +129,9 @@ class DualInputBackbone(nn.Module):
         # IR 分支：结构和 RGB 分支一致，但参数独立，用来学习红外模态特征。
         self.ir_stem = self._make_stem(branch_channels)
         # 在 P3 尺度融合 RGB/IR：baseline 保留 Cat + 1x1 Conv，AFF 版本增加自适应模态权重。
-        if residual_aff:
+        if residual_cgaff:
+            self.fuse = ResidualConcatGatedAFF(branch_channels, p3_channels, aff_reduction, residual_alpha)
+        elif residual_aff:
             self.fuse = ResidualAFF(branch_channels, p3_channels, aff_reduction, residual_alpha)
         elif use_aff:
             self.fuse = AFF(branch_channels, p3_channels, aff_reduction)
@@ -120,8 +167,12 @@ class DualInputBackbone(nn.Module):
         # 输入约定为 6 通道：前 3 通道是可见光 RGB，后 3 通道是红外 IR。
         rgb = self.rgb_stem(x[:, :3])
         ir = self.ir_stem(x[:, 3:6])
-        # AFF/ResidualAFF 直接输入两个模态；普通 dual baseline 则保持 Cat + 1x1 Conv。
-        p3 = self.fuse(rgb, ir) if isinstance(self.fuse, (AFF, ResidualAFF)) else self.fuse(torch.cat((rgb, ir), dim=1))
+        # AFF 系列直接输入两个模态；普通 dual baseline 则保持 Cat + 1x1 Conv。
+        p3 = (
+            self.fuse(rgb, ir)
+            if isinstance(self.fuse, (AFF, ResidualAFF, ConcatGatedAFF, ResidualConcatGatedAFF))
+            else self.fuse(torch.cat((rgb, ir), dim=1))
+        )
         # 基于融合特征继续提取 P4/P5，供 YOLO neck/head 做多尺度检测。
         p4 = self.p4(p3)
         p5 = self.p5(p4)
