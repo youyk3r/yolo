@@ -102,11 +102,16 @@ class ResidualConcatGatedAFF(nn.Module):
 class DifferenceAwareAFF(nn.Module):
     """Difference-aware concat-gated AFF for RGB/IR modality fusion."""
 
-    def __init__(self, channels: int, out_channels: int, reduction: int = 4):
-        """Initialize difference-aware AFF with explicit difference and consistency cues."""
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4, mode: str = "full"):
+        """Initialize difference-aware AFF with selectable difference and consistency cues."""
         super().__init__()
+        if mode not in {"full", "difference", "consistency"}:
+            raise ValueError(f"mode must be 'full', 'difference', or 'consistency', got {mode!r}")
+
+        self.use_difference = mode in {"full", "difference"}
+        self.use_consistency = mode in {"full", "consistency"}
         hidden_channels = max(channels // reduction, 8)
-        gate_channels = channels * 4
+        gate_channels = channels * (2 + int(self.use_difference) + int(self.use_consistency))
         self.local_att = nn.Sequential(
             nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
             nn.SiLU(inplace=True),
@@ -123,9 +128,12 @@ class DifferenceAwareAFF(nn.Module):
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
         """Fuse RGB/IR features using modality, difference, and consistency cues."""
-        difference = torch.abs(rgb - ir)
-        consistency = rgb * ir
-        mixed = torch.cat((rgb, ir, difference, consistency), dim=1)
+        cues = [rgb, ir]
+        if self.use_difference:
+            cues.append(torch.abs(rgb - ir))
+        if self.use_consistency:
+            cues.append(rgb * ir)
+        mixed = torch.cat(cues, dim=1)
         weights = self.act(self.local_att(mixed) + self.global_att(mixed))
         return self.project(torch.cat((rgb * weights, ir * (1.0 - weights)), dim=1))
 
@@ -133,11 +141,13 @@ class DifferenceAwareAFF(nn.Module):
 class ResidualDifferenceAwareAFF(nn.Module):
     """Residual difference-aware fusion that preserves the baseline concat path."""
 
-    def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1):
+    def __init__(
+        self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1, mode: str = "full"
+    ):
         """Initialize a baseline fusion path plus a learnable difference-aware residual."""
         super().__init__()
         self.base = Conv(channels * 2, out_channels, 1, 1)
-        self.aff = DifferenceAwareAFF(channels, out_channels, reduction)
+        self.aff = DifferenceAwareAFF(channels, out_channels, reduction, mode)
         self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
@@ -163,21 +173,24 @@ class DualInputBackbone(nn.Module):
         residual_alpha: float = 0.1,
         residual_cgaff: bool = False,
         residual_daff: bool = False,
+        da_mode: str = "full",
     ):
         """Initialize the dual-branch backbone."""
         super().__init__()
-        # P3 输出由 RGB/IR 两个分支拼接得到，所以每个分支先各自产生一半通道。
+        # P3 output is concatenated from RGB/IR branches, so each branch first produces half the channels.
         branch_channels = p3_channels // 2
         if branch_channels < 8 or p3_channels % 2:
             raise ValueError("p3_channels must be an even integer of at least 16")
 
-        # RGB 分支：只处理输入张量的前 3 个通道，逐步下采样到 P3/8 尺度。
+        # RGB/IR stems have the same structure but independent parameters for modality-specific features.
         self.rgb_stem = self._make_stem(branch_channels)
-        # IR 分支：结构和 RGB 分支一致，但参数独立，用来学习红外模态特征。
         self.ir_stem = self._make_stem(branch_channels)
-        # 在 P3 尺度融合 RGB/IR：baseline 保留 Cat + 1x1 Conv，AFF 版本增加自适应模态权重。
+
+        # Fuse RGB/IR at P3. Residual variants keep Cat + 1x1 Conv as the main path.
         if residual_daff:
-            self.fuse = ResidualDifferenceAwareAFF(branch_channels, p3_channels, aff_reduction, residual_alpha)
+            self.fuse = ResidualDifferenceAwareAFF(
+                branch_channels, p3_channels, aff_reduction, residual_alpha, da_mode
+            )
         elif residual_cgaff:
             self.fuse = ResidualConcatGatedAFF(branch_channels, p3_channels, aff_reduction, residual_alpha)
         elif residual_aff:
@@ -186,12 +199,12 @@ class DualInputBackbone(nn.Module):
             self.fuse = AFF(branch_channels, p3_channels, aff_reduction)
         else:
             self.fuse = Conv(p3_channels, p3_channels, 1, 1)
-        # 融合后的特征进入共享 backbone，继续生成 P4/16 特征。
+
+        # Shared backbone after fusion produces P4/16 and P5/32 features.
         self.p4 = nn.Sequential(
             Conv(p3_channels, p4_channels, 3, 2),
             C2f(p4_channels, p4_channels, n=2, shortcut=True),
         )
-        # 继续下采样生成 P5/32 特征，并接 SPPF 增强大感受野。
         self.p5 = nn.Sequential(
             Conv(p4_channels, p5_channels, 3, 2),
             C2f(p5_channels, p5_channels, n=1, shortcut=True),
@@ -213,10 +226,12 @@ class DualInputBackbone(nn.Module):
         """Return fused P3, P4, and P5 feature maps."""
         if x.ndim != 4 or x.shape[1] != 6:
             raise ValueError(f"DualInputBackbone expects [B, 6, H, W], got {tuple(x.shape)}")
-        # 输入约定为 6 通道：前 3 通道是可见光 RGB，后 3 通道是红外 IR。
+
+        # The six-channel input stores RGB in the first three channels and infrared in the last three channels.
         rgb = self.rgb_stem(x[:, :3])
         ir = self.ir_stem(x[:, 3:6])
-        # AFF 系列直接输入两个模态；普通 dual baseline 则保持 Cat + 1x1 Conv。
+
+        # AFF variants receive the two modalities directly; the plain baseline uses Cat + 1x1 Conv.
         p3 = (
             self.fuse(rgb, ir)
             if isinstance(
@@ -232,7 +247,7 @@ class DualInputBackbone(nn.Module):
             )
             else self.fuse(torch.cat((rgb, ir), dim=1))
         )
-        # 基于融合特征继续提取 P4/P5，供 YOLO neck/head 做多尺度检测。
+
         p4 = self.p4(p3)
         p5 = self.p5(p4)
         return [p3, p4, p5]

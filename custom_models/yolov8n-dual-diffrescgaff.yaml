@@ -1,4 +1,4 @@
-# Ultralytics YOLOv8n RGB/IR dual-branch object detection model with Difference-Aware Residual CGAFF.
+# Ultralytics YOLOv8n RGB/IR dual-branch object detection model with Difference-only Residual CGAFF.
 
 nc: 80
 channels: 6
@@ -6,7 +6,7 @@ scale: n
 
 # Args: [P3 channels, P4 channels, P5 channels, use AFF, AFF reduction ratio, residual AFF, residual alpha, residual CGAFF, residual DAFF, DA mode]
 backbone:
-  - [-1, 1, DualInputBackbone, [64, 128, 256, True, 4, False, 0.1, False, True, "full"]]
+  - [-1, 1, DualInputBackbone, [64, 128, 256, True, 4, False, 0.1, False, True, "difference"]]
   - [0, 1, Index, [64, 0]]
   - [0, 1, Index, [128, 1]]
   - [0, 1, Index, [256, 2]]
