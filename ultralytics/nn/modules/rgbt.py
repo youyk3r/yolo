@@ -9,7 +9,26 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import Conv
 
-__all__ = ("DualInputBackbone",)
+__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone")
+
+
+def _make_modality_stem(channels: int) -> nn.Sequential:
+    """Build one modality branch from a three-channel input to P3/8 features."""
+    return nn.Sequential(
+        Conv(3, channels // 4, 3, 2),
+        Conv(channels // 4, channels // 2, 3, 2),
+        C2f(channels // 2, channels // 2, n=1, shortcut=True),
+        Conv(channels // 2, channels, 3, 2),
+        C2f(channels, channels, n=1, shortcut=True),
+    )
+
+
+def _make_modality_stage(in_channels: int, out_channels: int, repeats: int) -> nn.Sequential:
+    """Downsample and refine one modality at the next feature scale."""
+    return nn.Sequential(
+        Conv(in_channels, out_channels, 3, 2),
+        C2f(out_channels, out_channels, n=repeats, shortcut=True),
+    )
 
 
 class AFF(nn.Module):
@@ -183,8 +202,8 @@ class DualInputBackbone(nn.Module):
             raise ValueError("p3_channels must be an even integer of at least 16")
 
         # RGB/IR stems have the same structure but independent parameters for modality-specific features.
-        self.rgb_stem = self._make_stem(branch_channels)
-        self.ir_stem = self._make_stem(branch_channels)
+        self.rgb_stem = _make_modality_stem(branch_channels)
+        self.ir_stem = _make_modality_stem(branch_channels)
 
         # Fuse RGB/IR at P3. Residual variants keep Cat + 1x1 Conv as the main path.
         if residual_daff:
@@ -209,17 +228,6 @@ class DualInputBackbone(nn.Module):
             Conv(p4_channels, p5_channels, 3, 2),
             C2f(p5_channels, p5_channels, n=1, shortcut=True),
             SPPF(p5_channels, p5_channels, 5),
-        )
-
-    @staticmethod
-    def _make_stem(channels: int) -> nn.Sequential:
-        """Build one modality branch from 3-channel input to P3/8 features."""
-        return nn.Sequential(
-            Conv(3, channels // 4, 3, 2),
-            Conv(channels // 4, channels // 2, 3, 2),
-            C2f(channels // 2, channels // 2, n=1, shortcut=True),
-            Conv(channels // 2, channels, 3, 2),
-            C2f(channels, channels, n=1, shortcut=True),
         )
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
@@ -250,4 +258,79 @@ class DualInputBackbone(nn.Module):
 
         p4 = self.p4(p3)
         p5 = self.p5(p4)
+        return [p3, p4, p5]
+
+
+class MultiScaleDualInputBackbone(nn.Module):
+    """Extract and fuse independent RGB/infrared features at the P3, P4, and P5 scales."""
+
+    def __init__(
+        self,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,  
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+        fusion_pattern: str = "RRR",
+    ):
+        """Initialize modality-specific stages and the requested P3/P4/P5 residual fusion pattern."""
+        super().__init__()
+        output_channels = (p3_channels, p4_channels, p5_channels)
+        if any(channels < 16 or channels % 8 for channels in output_channels):
+            raise ValueError("P3, P4, and P5 channels must be multiples of 8 and at least 16")
+        fusion_pattern = fusion_pattern.upper()
+        if len(fusion_pattern) != 3 or any(mode not in "RDC" for mode in fusion_pattern):
+            raise ValueError(f"fusion_pattern must contain three R/D/C modes for P3/P4/P5, got {fusion_pattern!r}")
+
+        branch_p3 = p3_channels // 2
+        branch_p4 = p4_channels * 5 // 8
+        branch_p5 = p5_channels * 5 // 8
+
+        # P3 remains half-width; 5/8-width deep branches match the parameter budget of the P3-only baseline.
+        self.rgb_stem = _make_modality_stem(branch_p3)
+        self.ir_stem = _make_modality_stem(branch_p3)
+        self.rgb_p4 = _make_modality_stage(branch_p3, branch_p4, repeats=2)
+        self.ir_p4 = _make_modality_stage(branch_p3, branch_p4, repeats=2)
+        self.rgb_p5 = _make_modality_stage(branch_p4, branch_p5, repeats=1)
+        self.ir_p5 = _make_modality_stage(branch_p4, branch_p5, repeats=1)
+
+        # Each scale selects R=ResCGAFF, D=difference-aware, or C=consistency-aware residual fusion.
+        self.fusion_pattern = fusion_pattern
+        self.fuse_p3 = self._make_fusion(
+            fusion_pattern[0], branch_p3, p3_channels, aff_reduction, residual_alpha
+        )
+        self.fuse_p4 = self._make_fusion(
+            fusion_pattern[1], branch_p4, p4_channels, aff_reduction, residual_alpha
+        )
+        self.fuse_p5 = self._make_fusion(
+            fusion_pattern[2], branch_p5, p5_channels, aff_reduction, residual_alpha
+        )
+        self.sppf = SPPF(p5_channels, p5_channels, 5)
+
+    @staticmethod
+    def _make_fusion(
+        mode: str, channels: int, out_channels: int, reduction: int, alpha: float
+    ) -> nn.Module:
+        """Build one scale's residual fusion module from its compact mode code."""
+        if mode == "R":
+            return ResidualConcatGatedAFF(channels, out_channels, reduction, alpha)
+        da_mode = "difference" if mode == "D" else "consistency"
+        return ResidualDifferenceAwareAFF(channels, out_channels, reduction, alpha, da_mode)
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Return independently fused P3, P4, and P5 feature maps."""
+        if x.ndim != 4 or x.shape[1] != 6:
+            raise ValueError(f"MultiScaleDualInputBackbone expects [B, 6, H, W], got {tuple(x.shape)}")
+
+        rgb_p3 = self.rgb_stem(x[:, :3])
+        ir_p3 = self.ir_stem(x[:, 3:6])
+        p3 = self.fuse_p3(rgb_p3, ir_p3)
+
+        rgb_p4 = self.rgb_p4(rgb_p3)
+        ir_p4 = self.ir_p4(ir_p3)
+        p4 = self.fuse_p4(rgb_p4, ir_p4)
+
+        rgb_p5 = self.rgb_p5(rgb_p4)
+        ir_p5 = self.ir_p5(ir_p4)
+        p5 = self.sppf(self.fuse_p5(rgb_p5, ir_p5))
         return [p3, p4, p5]

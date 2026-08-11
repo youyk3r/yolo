@@ -94,7 +94,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .rgbt import DualInputBackbone
+from .rgbt import DualInputBackbone, MultiScaleDualInputBackbone
 from .transformer import (
     AIFI,
     MLP,
@@ -152,6 +152,7 @@ __all__ = (
     "DWConv",
     "DWConvTranspose2d",
     "DualInputBackbone",
+    "MultiScaleDualInputBackbone",
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",
     "Detect",
