@@ -9,7 +9,12 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import Conv
 
-__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
+__all__ = (
+    "DualInputBackbone",
+    "MultiScaleDualInputBackbone",
+    "ResCGAFFP2Backbone",
+    "ResCGAFFP2RDLEBackbone",
+)
 
 
 def _make_modality_stem(channels: int) -> nn.Sequential:
@@ -317,7 +322,7 @@ class ResCGAFFP2Backbone(nn.Module):
 
         rgb_p2 = self.rgb_p2(x[:, :3])
         ir_p2 = self.ir_p2(x[:, 3:6])
-        p2 = self.fuse_p2(torch.cat((rgb_p2, ir_p2), dim=1))
+        p2 = self._fuse_p2(rgb_p2, ir_p2)
 
         rgb_p3 = self.rgb_p3(rgb_p2)
         ir_p3 = self.ir_p3(ir_p2)
@@ -325,6 +330,41 @@ class ResCGAFFP2Backbone(nn.Module):
         p4 = self.p4(p3)
         p5 = self.p5(p4)
         return [p2, p3, p4, p5]
+
+    def _fuse_p2(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse shallow RGB/IR features with the baseline concat projection."""
+        return self.fuse_p2(torch.cat((rgb, ir), dim=1))
+
+
+class ResCGAFFP2RDLEBackbone(ResCGAFFP2Backbone):
+    """Add residual difference localization enhancement to the P2 fusion output."""
+
+    def __init__(
+        self,
+        p2_channels: int = 32,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+        difference_beta: float = 0.0,
+    ):
+        """Initialize the P2 baseline and a lightweight normalized difference residual."""
+        super().__init__(p2_channels, p3_channels, p4_channels, p5_channels, aff_reduction, residual_alpha)
+        branch_channels = p2_channels // 2
+        self.rgb_norm = nn.GroupNorm(1, branch_channels, affine=False)
+        self.ir_norm = nn.GroupNorm(1, branch_channels, affine=False)
+        self.difference = nn.Sequential(
+            Conv(branch_channels, branch_channels, 3, 1, g=branch_channels),
+            Conv(branch_channels, p2_channels, 1, 1),
+        )
+        self.beta = nn.Parameter(torch.tensor(difference_beta, dtype=torch.float32))
+
+    def _fuse_p2(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Preserve baseline fusion and add normalized RGB/IR differences as a localization residual."""
+        base = super()._fuse_p2(rgb, ir)
+        difference = torch.abs(self.rgb_norm(rgb) - self.ir_norm(ir))
+        return base + self.beta * self.difference(difference)
 
 
 class MultiScaleDualInputBackbone(nn.Module):

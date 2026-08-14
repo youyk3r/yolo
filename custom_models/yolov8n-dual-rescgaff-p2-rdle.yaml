@@ -1,0 +1,40 @@
+# Ultralytics YOLOv8n RGB/IR model with P2 RDLE, P3 ResCGAFF, and four-scale detection.
+
+nc: 80
+channels: 6
+scale: n
+
+# Args: [P2 channels, P3 channels, P4 channels, P5 channels, AFF reduction, residual alpha, RDLE beta]
+backbone:
+  - [-1, 1, ResCGAFFP2RDLEBackbone, [32, 64, 128, 256, 4, 0.1, 0.0]]
+  - [0, 1, Index, [32, 0]]
+  - [0, 1, Index, [64, 1]]
+  - [0, 1, Index, [128, 2]]
+  - [0, 1, Index, [256, 3]]
+
+head:
+  - [4, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 3], 1, Concat, [1]]
+  - [-1, 1, C2f, [128]]
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 2], 1, Concat, [1]]
+  - [-1, 1, C2f, [64]]
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 1], 1, Concat, [1]]
+  - [-1, 1, C2f, [32]]
+
+  - [-1, 1, Conv, [32, 3, 2]]
+  - [[-1, 10], 1, Concat, [1]]
+  - [-1, 1, C2f, [64]]
+
+  - [-1, 1, Conv, [64, 3, 2]]
+  - [[-1, 7], 1, Concat, [1]]
+  - [-1, 1, C2f, [128]]
+
+  - [-1, 1, Conv, [128, 3, 2]]
+  - [[-1, 4], 1, Concat, [1]]
+  - [-1, 1, C2f, [256]]
+
+  - [[13, 16, 19, 22], 1, Detect, [nc]]
