@@ -9,7 +9,7 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import Conv
 
-__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone")
+__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
 
 
 def _make_modality_stem(channels: int) -> nn.Sequential:
@@ -259,6 +259,72 @@ class DualInputBackbone(nn.Module):
         p4 = self.p4(p3)
         p5 = self.p5(p4)
         return [p3, p4, p5]
+
+
+class ResCGAFFP2Backbone(nn.Module):
+    """Preserve P2 features before ResCGAFF fusion at P3 for four-scale detection."""
+
+    def __init__(
+        self,
+        p2_channels: int = 32,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+    ):
+        """Initialize separate RGB/IR P2-P3 stages followed by the shared P4-P5 backbone."""
+        super().__init__()
+        output_channels = (p2_channels, p3_channels, p4_channels, p5_channels)
+        if any(channels < 16 or channels % 2 for channels in output_channels):
+            raise ValueError("P2, P3, P4, and P5 channels must be even integers of at least 16")
+
+        branch_p2 = p2_channels // 2
+        branch_p3 = p3_channels // 2
+        stem_channels = branch_p2 // 2
+        if stem_channels < 8:
+            raise ValueError("p2_channels must be at least 32")
+
+        # P2 retains shallow spatial detail from both modalities without competitive attention filtering.
+        self.rgb_p2 = nn.Sequential(
+            Conv(3, stem_channels, 3, 2),
+            Conv(stem_channels, branch_p2, 3, 2),
+            C2f(branch_p2, branch_p2, n=1, shortcut=True),
+        )
+        self.ir_p2 = nn.Sequential(
+            Conv(3, stem_channels, 3, 2),
+            Conv(stem_channels, branch_p2, 3, 2),
+            C2f(branch_p2, branch_p2, n=1, shortcut=True),
+        )
+        self.fuse_p2 = Conv(p2_channels, p2_channels, 1, 1)
+
+        # P3 keeps the original modality-specific stage and Residual Concat-Gated AFF fusion.
+        self.rgb_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
+        self.ir_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
+        self.fuse_p3 = ResidualConcatGatedAFF(branch_p3, p3_channels, aff_reduction, residual_alpha)
+
+        self.p4 = _make_modality_stage(p3_channels, p4_channels, repeats=2)
+        self.p5 = nn.Sequential(
+            Conv(p4_channels, p5_channels, 3, 2),
+            C2f(p5_channels, p5_channels, n=1, shortcut=True),
+            SPPF(p5_channels, p5_channels, 5),
+        )
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Return fused P2, P3, P4, and P5 feature maps."""
+        if x.ndim != 4 or x.shape[1] != 6:
+            raise ValueError(f"ResCGAFFP2Backbone expects [B, 6, H, W], got {tuple(x.shape)}")
+
+        rgb_p2 = self.rgb_p2(x[:, :3])
+        ir_p2 = self.ir_p2(x[:, 3:6])
+        p2 = self.fuse_p2(torch.cat((rgb_p2, ir_p2), dim=1))
+
+        rgb_p3 = self.rgb_p3(rgb_p2)
+        ir_p3 = self.ir_p3(ir_p2)
+        p3 = self.fuse_p3(rgb_p3, ir_p3)
+        p4 = self.p4(p3)
+        p5 = self.p5(p4)
+        return [p2, p3, p4, p5]
 
 
 class MultiScaleDualInputBackbone(nn.Module):
