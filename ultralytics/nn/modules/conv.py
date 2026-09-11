@@ -18,6 +18,7 @@ __all__ = (
     "ConvTranspose",
     "DWConv",
     "DWConvTranspose2d",
+    "ECA",
     "Focus",
     "GhostConv",
     "Index",
@@ -544,6 +545,30 @@ class ChannelAttention(nn.Module):
             (torch.Tensor): Channel-attended output tensor.
         """
         return x * self.act(self.fc(self.pool(x)))
+
+
+class ECA(nn.Module):
+    """Efficient channel attention with local cross-channel interaction."""
+
+    def __init__(self, channels: int, kernel_size: int = 3) -> None:
+        """Initialize ECA.
+
+        Args:
+            channels (int): Number of input channels.
+            kernel_size (int): Odd 1D interaction kernel size across channels.
+        """
+        super().__init__()
+        if kernel_size < 1 or kernel_size % 2 == 0:
+            raise ValueError(f"kernel_size must be a positive odd integer, got {kernel_size}")
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size, padding=(kernel_size - 1) // 2, bias=False)
+        self.act = nn.Sigmoid()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Recalibrate channels using pooled local channel context."""
+        weights = self.pool(x).squeeze(-1).transpose(-1, -2)
+        weights = self.conv(weights).transpose(-1, -2).unsqueeze(-1)
+        return x * self.act(weights)
 
 
 class SpatialAttention(nn.Module):

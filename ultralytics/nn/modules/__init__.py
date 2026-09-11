@@ -69,6 +69,7 @@ from .conv import (
     ConvTranspose,
     DWConv,
     DWConvTranspose2d,
+    ECA,
     Focus,
     GhostConv,
     Index,
@@ -94,7 +95,13 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .rgbt import DualInputBackbone, MultiScaleDualInputBackbone, ResCGAFFP2Backbone, ResCGAFFP2RDLEBackbone
+from .rgbt import (
+    DualInputBackbone,
+    MultiScaleDualInputBackbone,
+    ResCGAFFP2Backbone,
+    ResCGAFFP2ECABackbone,
+    ResCGAFFP2RDLEBackbone,
+)
 from .transformer import (
     AIFI,
     MLP,
@@ -151,9 +158,11 @@ __all__ = (
     "ConvTranspose",
     "DWConv",
     "DWConvTranspose2d",
+    "ECA",
     "DualInputBackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
+    "ResCGAFFP2ECABackbone",
     "ResCGAFFP2RDLEBackbone",
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",

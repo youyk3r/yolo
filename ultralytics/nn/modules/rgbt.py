@@ -7,10 +7,11 @@ import torch
 import torch.nn as nn
 
 from .block import C2f, SPPF
-from .conv import Conv
+from .conv import Conv, ECA
 
 __all__ = (
     "DualInputBackbone",
+    "ResCGAFFP2ECABackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
     "ResCGAFFP2RDLEBackbone",
@@ -65,7 +66,7 @@ class AFF(nn.Module):
 
 
 class ResidualAFF(nn.Module):
-    """Residual AFF-v2 fusion that preserves the baseline concat path."""
+    """Residual AFF-v2 fusion that preserves the baseline concat path."""  
 
     def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1):
         """Initialize a baseline fusion path plus a learnable AFF residual."""
@@ -365,6 +366,28 @@ class ResCGAFFP2RDLEBackbone(ResCGAFFP2Backbone):
         base = super()._fuse_p2(rgb, ir)
         difference = torch.abs(self.rgb_norm(rgb) - self.ir_norm(ir))
         return base + self.beta * self.difference(difference)
+
+
+class ResCGAFFP2ECABackbone(ResCGAFFP2Backbone):
+    """Add efficient channel attention to the fused P2 feature map."""
+
+    def __init__(
+        self,
+        p2_channels: int = 32,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+        eca_kernel_size: int = 3,
+    ):
+        """Initialize the ResCGAFF-P2 backbone with an ECA P2 recalibration layer."""
+        super().__init__(p2_channels, p3_channels, p4_channels, p5_channels, aff_reduction, residual_alpha)
+        self.eca_p2 = ECA(p2_channels, eca_kernel_size)
+
+    def _fuse_p2(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse P2 features with the baseline projection, then apply ECA."""
+        return self.eca_p2(super()._fuse_p2(rgb, ir))
 
 
 class MultiScaleDualInputBackbone(nn.Module):
