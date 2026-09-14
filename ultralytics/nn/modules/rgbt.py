@@ -9,7 +9,7 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import Conv
 
-__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
+__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone", "ResCGAFFP2P3ResidualBackbone")
 
 
 def _make_modality_stem(channels: int) -> nn.Sequential:
@@ -322,6 +322,42 @@ class ResCGAFFP2Backbone(nn.Module):
         rgb_p3 = self.rgb_p3(rgb_p2)
         ir_p3 = self.ir_p3(ir_p2)
         p3 = self.fuse_p3(rgb_p3, ir_p3)
+        p4 = self.p4(p3)
+        p5 = self.p5(p4)
+        return [p2, p3, p4, p5]
+
+
+class ResCGAFFP2P3ResidualBackbone(ResCGAFFP2Backbone):
+    """Inject transformed P2 spatial details into the fused P3 feature map."""
+
+    def __init__(
+        self,
+        p2_channels: int = 32,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+        detail_alpha: float = 0.1,
+    ):
+        """Initialize the ResCGAFF-P2 backbone with a residual P2-to-P3 detail path."""
+        super().__init__(p2_channels, p3_channels, p4_channels, p5_channels, aff_reduction, residual_alpha)
+        self.p2_to_p3 = Conv(p2_channels, p3_channels, 3, 2)
+        self.detail_alpha = nn.Parameter(torch.tensor(detail_alpha, dtype=torch.float32))
+
+    def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
+        """Return P2, P3, P4, and P5 features after residual P2-to-P3 detail injection."""
+        if x.ndim != 4 or x.shape[1] != 6:
+            raise ValueError(f"ResCGAFFP2P3ResidualBackbone expects [B, 6, H, W], got {tuple(x.shape)}")
+
+        rgb_p2 = self.rgb_p2(x[:, :3])
+        ir_p2 = self.ir_p2(x[:, 3:6])
+        p2 = self.fuse_p2(torch.cat((rgb_p2, ir_p2), dim=1))
+
+        rgb_p3 = self.rgb_p3(rgb_p2)
+        ir_p3 = self.ir_p3(ir_p2)
+        p3 = self.fuse_p3(rgb_p3, ir_p3)
+        p3 = p3 + self.detail_alpha * self.p2_to_p3(p2)
         p4 = self.p4(p3)
         p5 = self.p5(p4)
         return [p2, p3, p4, p5]
