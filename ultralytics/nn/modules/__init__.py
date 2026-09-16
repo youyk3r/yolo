@@ -94,7 +94,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .rgbt import DualInputBackbone, MultiScaleDualInputBackbone, ResCGAFFP2Backbone, ResCGAFFP2P3SemanticGateBackbone
+from .rgbt import CEP2Enhancement, DualInputBackbone, MultiScaleDualInputBackbone, ResCGAFFP2Backbone, ResCGAFFP2P3SemanticGateBackbone
 from .transformer import (
     AIFI,
     MLP,
@@ -144,6 +144,7 @@ __all__ = (
     "CBLinear",
     "ChannelAttention",
     "Classify",
+    "CEP2Enhancement",
     "Concat",
     "ContrastiveHead",
     "Conv",

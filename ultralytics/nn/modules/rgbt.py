@@ -9,7 +9,13 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import Conv
 
-__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone", "ResCGAFFP2P3SemanticGateBackbone")
+__all__ = (
+    "DualInputBackbone",
+    "MultiScaleDualInputBackbone",
+    "ResCGAFFP2Backbone",
+    "ResCGAFFP2P3SemanticGateBackbone",
+    "CEP2Enhancement",
+)
 
 
 def _make_modality_stem(channels: int) -> nn.Sequential:
@@ -356,6 +362,22 @@ class ResCGAFFP2P3SemanticGateBackbone(ResCGAFFP2Backbone):
         detail = self.p2_to_p3(p2)
         gate = torch.sigmoid(self.p3_gate(p3))
         return p3 + self.detail_alpha * gate * detail
+
+
+class CEP2Enhancement(nn.Module):
+    """Lightweight residual enhancement for the fused P2 neck feature."""
+
+    def __init__(self, c1: int, c2: int, beta: float = 0.1):
+        """Initialize the P2 enhancement layer."""
+        super().__init__()
+        if c1 != c2:
+            raise ValueError(f"CEP2Enhancement requires matching channels, got {c1} and {c2}")
+        self.enhance = Conv(c1, c2, 3, 1)
+        self.beta = float(beta)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Enhance P2 while preserving its spatial resolution and channel count."""
+        return x + self.beta * self.enhance(x)
 
 
 class MultiScaleDualInputBackbone(nn.Module):
