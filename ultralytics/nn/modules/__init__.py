@@ -94,7 +94,7 @@ from .head import (
     YOLOESegment26,
     v10Detect,
 )
-from .rgbt import DualInputBackbone, MultiScaleDualInputBackbone, ResCGAFFP2Backbone
+from .rgbt import DualInputBackbone, MultiScaleDualInputBackbone, ResCGAFFP2Backbone, ResCGAFFP2P3SemanticGateBackbone
 from .transformer import (
     AIFI,
     MLP,
@@ -154,6 +154,7 @@ __all__ = (
     "DualInputBackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
+    "ResCGAFFP2P3SemanticGateBackbone",
     "DeformableTransformerDecoder",
     "DeformableTransformerDecoderLayer",
     "Detect",
