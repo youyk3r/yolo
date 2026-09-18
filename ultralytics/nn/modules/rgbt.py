@@ -13,7 +13,10 @@ __all__ = (
     "DualInputBackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
+    "SpatialMultiScaleCGAFFP2Backbone",
     "ResCGAFFP2P3SemanticGateBackbone",
+    "SpatialMultiScaleCGAFF",
+    "ResidualSpatialMultiScaleCGAFF",
     "CEP2Enhancement",
 )
 
@@ -121,6 +124,58 @@ class ResidualConcatGatedAFF(nn.Module):
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
         """Fuse with Cat + 1x1 Conv as the main path and concat-gated AFF as residual enhancement."""
+        return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
+
+
+class SpatialMultiScaleCGAFF(nn.Module):
+    """Concat-gated AFF with independent modality spatial attention and multi-scale depthwise convolution."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4):
+        """Initialize spatially enhanced concat-gated AFF."""
+        super().__init__()
+        hidden_channels = max(channels // reduction, 8)
+        gate_channels = channels * 2
+        self.rgb_spatial = nn.Sequential(nn.Conv2d(channels, 1, 1, bias=True), nn.Sigmoid())
+        self.ir_spatial = nn.Sequential(nn.Conv2d(channels, 1, 1, bias=True), nn.Sigmoid())
+        self.local_att = nn.Sequential(
+            nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, channels, 1, bias=True),
+        )
+        self.global_att = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, channels, 1, bias=True),
+        )
+        self.act = nn.Sigmoid()
+        self.dwconv3 = nn.Conv2d(gate_channels, gate_channels, 3, 1, 1, groups=gate_channels, bias=False)
+        self.dwconv5 = nn.Conv2d(gate_channels, gate_channels, 5, 1, 2, groups=gate_channels, bias=False)
+        self.project = Conv(gate_channels, out_channels, 1, 1)
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Apply independent spatial attention, modality gating, and multi-scale enhancement."""
+        rgb_s = rgb * self.rgb_spatial(rgb)
+        ir_s = ir * self.ir_spatial(ir)
+        mixed = torch.cat((rgb_s, ir_s), dim=1)
+        weights = self.act(self.local_att(mixed) + self.global_att(mixed))
+        weighted = torch.cat((rgb_s * weights, ir_s * (1.0 - weights)), dim=1)
+        multi_scale = weighted + self.dwconv3(weighted) + self.dwconv5(weighted)
+        return self.project(multi_scale)
+
+
+class ResidualSpatialMultiScaleCGAFF(nn.Module):
+    """Residual spatial and multi-scale concat-gated AFF fusion."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1):
+        """Initialize the unchanged concat baseline and enhanced residual path."""
+        super().__init__()
+        self.base = Conv(channels * 2, out_channels, 1, 1)
+        self.aff = SpatialMultiScaleCGAFF(channels, out_channels, reduction)
+        self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse the baseline concat path with the enhanced residual path."""
         return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
 
 
@@ -336,6 +391,23 @@ class ResCGAFFP2Backbone(nn.Module):
     def _enhance_p3(self, p2: torch.Tensor, p3: torch.Tensor) -> torch.Tensor:
         """Return the baseline P3 feature without cross-scale enhancement."""
         return p3
+
+
+class SpatialMultiScaleCGAFFP2Backbone(ResCGAFFP2Backbone):
+    """ResCGAFF-P2 backbone using spatial and multi-scale P3 residual fusion."""
+
+    def __init__(
+        self,
+        p2_channels: int = 32,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+    ):
+        """Initialize the baseline P2 backbone and replace only its P3 fusion module."""
+        super().__init__(p2_channels, p3_channels, p4_channels, p5_channels, aff_reduction, residual_alpha)
+        self.fuse_p3 = ResidualSpatialMultiScaleCGAFF(p3_channels // 2, p3_channels, aff_reduction, residual_alpha)
 
 
 class ResCGAFFP2P3SemanticGateBackbone(ResCGAFFP2Backbone):

@@ -50,7 +50,8 @@ def parse_args() -> argparse.Namespace:
         help="Output dataset root. Relative paths are resolved from the current working directory.",
     )
     parser.add_argument("--target-size", type=int, nargs=2, metavar=("W", "H"), default=(640, 640), help="Resize size.")
-    parser.add_argument("--train-ratio", type=float, default=0.8, help="Train split ratio.")
+    parser.add_argument("--train-ratio", type=float, default=4 / 6, help="Train split ratio.")
+    parser.add_argument("--val-ratio", type=float, default=1 / 6, help="Validation split ratio.")
     parser.add_argument("--seed", type=int, default=42, help="Random split seed.")
     parser.add_argument("--limit", type=int, default=0, help="Limit converted pairs for smoke testing. 0 means all.")
     parser.add_argument("--overwrite", action="store_true", help="Delete an existing output dataset before writing.")
@@ -128,13 +129,17 @@ def find_matched_stems(src_root: Path) -> tuple[list[str], dict[str, Path], dict
     return stems, vi_files, ir_files, label_files
 
 
-def split_stems(stems: list[str], train_ratio: float, seed: int) -> tuple[list[str], list[str]]:
-    if not 0.0 < train_ratio < 1.0:
-        raise ValueError("--train-ratio must be between 0 and 1")
+def split_stems(stems: list[str], train_ratio: float, val_ratio: float, seed: int) -> tuple[list[str], list[str], list[str]]:
+    if not 0.0 < train_ratio < 1.0 or not 0.0 < val_ratio < 1.0 or train_ratio + val_ratio >= 1.0:
+        raise ValueError("--train-ratio and --val-ratio must be positive and sum to less than 1")
     stems = stems.copy()
     random.Random(seed).shuffle(stems)
-    n_train = max(1, min(len(stems) - 1, round(len(stems) * train_ratio))) if len(stems) > 1 else len(stems)
-    return sorted(stems[:n_train]), sorted(stems[n_train:])
+    n_train = round(len(stems) * train_ratio)
+    n_val = round(len(stems) * val_ratio)
+    if len(stems) >= 3:
+        n_train = max(1, min(len(stems) - 2, n_train))
+        n_val = max(1, min(len(stems) - n_train - 1, n_val))
+    return sorted(stems[:n_train]), sorted(stems[n_train : n_train + n_val]), sorted(stems[n_train + n_val :])
 
 
 def reset_output(dst_root: Path, overwrite: bool) -> None:
@@ -142,7 +147,7 @@ def reset_output(dst_root: Path, overwrite: bool) -> None:
         if not overwrite:
             raise FileExistsError(f"Output directory is not empty: {dst_root}. Use --overwrite to replace it.")
         shutil.rmtree(dst_root)
-    for split in ("train", "val"):
+    for split in ("train", "val", "test"):
         (dst_root / "images" / split).mkdir(parents=True, exist_ok=True)
         (dst_root / "labels" / split).mkdir(parents=True, exist_ok=True)
 
@@ -153,7 +158,8 @@ def write_yaml(dst_root: Path, names: list[str]) -> None:
     content = (
         f"path: {dst_root.resolve().as_posix()}\n"
         "train: images/train\n"
-        "val: images/val\n\n"
+        "val: images/val\n"
+        "test: images/test\n\n"
         "channels: 6\n"
         f"nc: {len(names)}\n\n"
         "names:\n"
@@ -217,9 +223,9 @@ def main() -> int:
         stems = stems[: args.limit]
         print(f"[INFO] limit enabled: using first {len(stems)} matched pairs")
 
-    train_stems, val_stems = split_stems(stems, args.train_ratio, args.seed)
+    train_stems, val_stems, test_stems = split_stems(stems, args.train_ratio, args.val_ratio, args.seed)
     print(f"Matched pairs: {len(stems)}")
-    print(f"Train/val: {len(train_stems)}/{len(val_stems)}")
+    print(f"Train/val/test: {len(train_stems)}/{len(val_stems)}/{len(test_stems)}")
 
     reset_output(dst_root, args.overwrite)
     train_kept, train_dropped = convert_split(
@@ -228,10 +234,13 @@ def main() -> int:
     val_kept, val_dropped = convert_split(
         "val", val_stems, vi_files, ir_files, label_files, dst_root, target_size, args.save_mode, class_map
     )
+    test_kept, test_dropped = convert_split(
+        "test", test_stems, vi_files, ir_files, label_files, dst_root, target_size, args.save_mode, class_map
+    )
     write_yaml(dst_root, args.names)
 
     print("\nDONE")
-    print(f"Total labels kept/dropped: {train_kept + val_kept}/{train_dropped + val_dropped}")
+    print(f"Total labels kept/dropped: {train_kept + val_kept + test_kept}/{train_dropped + val_dropped + test_dropped}")
     print(f"Dataset YAML: {dst_root / 'rgbt6.yaml'}")
     print("Next smoke train command:")
     print(f"  yolo detect train model=yolov8n-6ch.yaml data={dst_root / 'rgbt6.yaml'} imgsz=640 batch=2 epochs=1 workers=0")
