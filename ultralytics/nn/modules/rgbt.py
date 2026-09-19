@@ -13,6 +13,7 @@ __all__ = (
     "DualInputBackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
+    "ResCGAFFP2ResidualBaseBackbone",
     "SpatialMultiScaleCGAFFP2Backbone",
     "ResCGAFFP2P3SemanticGateBackbone",
     "SpatialMultiScaleCGAFF",
@@ -115,16 +116,22 @@ class ConcatGatedAFF(nn.Module):
 class ResidualConcatGatedAFF(nn.Module):
     """Residual concat-gated AFF fusion that preserves the baseline concat path."""
 
-    def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1):
-        """Initialize a baseline fusion path plus a learnable concat-gated AFF residual."""
+    def __init__(
+        self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1, base_kernel: int = 0
+    ):
+        """Initialize a concat baseline with optional per-modality preprocessing and an AFF residual."""
         super().__init__()
+        if base_kernel not in (0, 1, 3):
+            raise ValueError(f"base_kernel must be 0, 1, or 3, got {base_kernel}")
+        self.rgb_base = nn.Identity() if base_kernel == 0 else Conv(channels, channels, base_kernel, 1)
+        self.ir_base = nn.Identity() if base_kernel == 0 else Conv(channels, channels, base_kernel, 1)
         self.base = Conv(channels * 2, out_channels, 1, 1)
         self.aff = ConcatGatedAFF(channels, out_channels, reduction)
         self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
-        """Fuse with Cat + 1x1 Conv as the main path and concat-gated AFF as residual enhancement."""
-        return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
+        """Fuse the selected concat baseline with the unchanged concat-gated AFF residual."""
+        return self.base(torch.cat((self.rgb_base(rgb), self.ir_base(ir)), dim=1)) + self.alpha * self.aff(rgb, ir)
 
 
 class SpatialMultiScaleCGAFF(nn.Module):
@@ -391,6 +398,26 @@ class ResCGAFFP2Backbone(nn.Module):
     def _enhance_p3(self, p2: torch.Tensor, p3: torch.Tensor) -> torch.Tensor:
         """Return the baseline P3 feature without cross-scale enhancement."""
         return p3
+
+
+class ResCGAFFP2ResidualBaseBackbone(ResCGAFFP2Backbone):
+    """ResCGAFF-P2 backbone with selectable residual concat preprocessing at P3."""
+
+    def __init__(
+        self,
+        p2_channels: int = 32,
+        p3_channels: int = 64,
+        p4_channels: int = 128,
+        p5_channels: int = 256,
+        aff_reduction: int = 4,
+        residual_alpha: float = 0.1,
+        base_kernel: int = 0,
+    ):
+        """Initialize ResCGAFF-P2 and replace only its residual baseline branch."""
+        super().__init__(p2_channels, p3_channels, p4_channels, p5_channels, aff_reduction, residual_alpha)
+        self.fuse_p3 = ResidualConcatGatedAFF(
+            p3_channels // 2, p3_channels, aff_reduction, residual_alpha, base_kernel
+        )
 
 
 class SpatialMultiScaleCGAFFP2Backbone(ResCGAFFP2Backbone):
