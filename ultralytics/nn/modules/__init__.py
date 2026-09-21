@@ -99,6 +99,7 @@ from .rgbt import (
     DualInputBackbone,
     MultiScaleDualInputBackbone,
     ResCGAFFP2Backbone,
+    ResCGAFFMultiScaleBackbone,
     ResCGAFFP2ECABackbone,
     ResCGAFFP2RDLEBackbone,
 )

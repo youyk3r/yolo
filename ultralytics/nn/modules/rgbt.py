@@ -14,6 +14,7 @@ __all__ = (
     "ResCGAFFP2ECABackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
+    "ResCGAFFMultiScaleBackbone",
     "ResCGAFFP2RDLEBackbone",
 )
 
@@ -335,6 +336,50 @@ class ResCGAFFP2Backbone(nn.Module):
     def _fuse_p2(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
         """Fuse shallow RGB/IR features with the baseline concat projection."""
         return self.fuse_p2(torch.cat((rgb, ir), dim=1))
+
+
+class ResCGAFFMultiScaleBackbone(nn.Module):
+    """Dual RGB/IR backbone with configurable ResCGAFF fusion at P2-P5."""
+
+    def __init__(self, p2_channels=32, p3_channels=64, p4_channels=128, p5_channels=256,
+                 aff_reduction=4, residual_alpha=0.1, fusion_pattern="CRCC"):
+        super().__init__()
+        pattern = fusion_pattern.upper()
+        if len(pattern) != 4 or any(mode not in "CR" for mode in pattern):
+            raise ValueError(f"fusion_pattern must contain four C/R modes for P2/P3/P4/P5, got {pattern!r}")
+        b2, b3, b4, b5 = p2_channels // 2, p3_channels // 2, p4_channels // 2, p5_channels // 2
+        stem = b2 // 2
+        self.rgb_p2 = nn.Sequential(Conv(3, stem, 3, 2), Conv(stem, b2, 3, 2), C2f(b2, b2, n=1, shortcut=True))
+        self.ir_p2 = nn.Sequential(Conv(3, stem, 3, 2), Conv(stem, b2, 3, 2), C2f(b2, b2, n=1, shortcut=True))
+        self.rgb_p3, self.ir_p3 = _make_modality_stage(b2, b3, 1), _make_modality_stage(b2, b3, 1)
+        self.rgb_p4, self.ir_p4 = _make_modality_stage(b3, b4, 2), _make_modality_stage(b3, b4, 2)
+        self.rgb_p5 = nn.Sequential(Conv(b4, b5, 3, 2), C2f(b5, b5, n=1, shortcut=True))
+        self.ir_p5 = nn.Sequential(Conv(b4, b5, 3, 2), C2f(b5, b5, n=1, shortcut=True))
+        channels = (p2_channels, p3_channels, p4_channels, p5_channels)
+        branches = (b2, b3, b4, b5)
+        self.fusions = nn.ModuleList(
+            ResidualConcatGatedAFF(branch, out, aff_reduction, residual_alpha)
+            if mode == "R" else Conv(branch * 2, out, 1, 1)
+            for mode, branch, out in zip(pattern, branches, channels)
+        )
+        self.sppf = SPPF(p5_channels, p5_channels, 5)
+
+    def forward(self, x):
+        if x.ndim != 4 or x.shape[1] != 6:
+            raise ValueError(f"ResCGAFFMultiScaleBackbone expects [B, 6, H, W], got {tuple(x.shape)}")
+        rgb, ir = self.rgb_p2(x[:, :3]), self.ir_p2(x[:, 3:6])
+        outputs = [self._fuse(self.fusions[0], rgb, ir)]
+        rgb, ir = self.rgb_p3(rgb), self.ir_p3(ir)
+        outputs.append(self._fuse(self.fusions[1], rgb, ir))
+        rgb, ir = self.rgb_p4(rgb), self.ir_p4(ir)
+        outputs.append(self._fuse(self.fusions[2], rgb, ir))
+        rgb, ir = self.rgb_p5(rgb), self.ir_p5(ir)
+        outputs.append(self.sppf(self._fuse(self.fusions[3], rgb, ir)))
+        return outputs
+
+    @staticmethod
+    def _fuse(module, rgb, ir):
+        return module(rgb, ir) if isinstance(module, ResidualConcatGatedAFF) else module(torch.cat((rgb, ir), dim=1))
 
 
 class ResCGAFFP2RDLEBackbone(ResCGAFFP2Backbone):

@@ -65,6 +65,7 @@ from ultralytics.nn.modules import (
     RepNCSPELAN4,
     RepVGGDW,
     ResCGAFFP2Backbone,
+    ResCGAFFMultiScaleBackbone,
     ResCGAFFP2ECABackbone,
     ResCGAFFP2RDLEBackbone,
     ResNetLayer,
