@@ -342,7 +342,7 @@ class ResCGAFFMultiScaleBackbone(nn.Module):
     """Dual RGB/IR backbone with configurable ResCGAFF fusion at P2-P5."""
 
     def __init__(self, p2_channels=32, p3_channels=64, p4_channels=128, p5_channels=256,
-                 aff_reduction=4, residual_alpha=0.1, fusion_pattern="CRCC"):
+                 aff_reduction=4, residual_alpha=0.1, fusion_pattern="CRCC", eca_p2=False, eca_kernel_size=3):
         super().__init__()
         pattern = fusion_pattern.upper()
         if len(pattern) != 4 or any(mode not in "CR" for mode in pattern):
@@ -362,13 +362,14 @@ class ResCGAFFMultiScaleBackbone(nn.Module):
             if mode == "R" else Conv(branch * 2, out, 1, 1)
             for mode, branch, out in zip(pattern, branches, channels)
         )
+        self.eca_p2 = ECA(p2_channels, eca_kernel_size) if eca_p2 else nn.Identity()
         self.sppf = SPPF(p5_channels, p5_channels, 5)
 
     def forward(self, x):
         if x.ndim != 4 or x.shape[1] != 6:
             raise ValueError(f"ResCGAFFMultiScaleBackbone expects [B, 6, H, W], got {tuple(x.shape)}")
         rgb, ir = self.rgb_p2(x[:, :3]), self.ir_p2(x[:, 3:6])
-        outputs = [self._fuse(self.fusions[0], rgb, ir)]
+        outputs = [self.eca_p2(self._fuse(self.fusions[0], rgb, ir))]
         rgb, ir = self.rgb_p3(rgb), self.ir_p3(ir)
         outputs.append(self._fuse(self.fusions[1], rgb, ir))
         rgb, ir = self.rgb_p4(rgb), self.ir_p4(ir)
