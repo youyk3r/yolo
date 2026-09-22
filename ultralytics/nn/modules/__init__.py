@@ -100,6 +100,8 @@ from .rgbt import (
     MultiScaleDualInputBackbone,
     ResCGAFFP2Backbone,
     ResCGAFFMultiScaleBackbone,
+    NeckECA,
+    NeckDWConvECA,
     ResCGAFFP2ECABackbone,
     ResCGAFFP2RDLEBackbone,
 )
@@ -163,6 +165,9 @@ __all__ = (
     "DualInputBackbone",
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
+    "ResCGAFFMultiScaleBackbone",
+    "NeckECA",
+    "NeckDWConvECA",
     "ResCGAFFP2ECABackbone",
     "ResCGAFFP2RDLEBackbone",
     "DeformableTransformerDecoder",

@@ -15,6 +15,8 @@ __all__ = (
     "MultiScaleDualInputBackbone",
     "ResCGAFFP2Backbone",
     "ResCGAFFMultiScaleBackbone",
+    "NeckECA",
+    "NeckDWConvECA",
     "ResCGAFFP2RDLEBackbone",
 )
 
@@ -381,6 +383,37 @@ class ResCGAFFMultiScaleBackbone(nn.Module):
     @staticmethod
     def _fuse(module, rgb, ir):
         return module(rgb, ir) if isinstance(module, ResidualConcatGatedAFF) else module(torch.cat((rgb, ir), dim=1))
+
+
+class NeckECA(nn.Module):
+    """Apply efficient channel attention to a neck feature without changing its shape."""
+
+    def __init__(self, c1: int, c2: int, kernel_size: int = 3):
+        """Initialize the channel recalibration layer."""
+        super().__init__()
+        if c1 != c2:
+            raise ValueError(f"NeckECA requires matching input/output channels, got {c1} and {c2}")
+        self.eca = ECA(c1, kernel_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Recalibrate neck channels."""
+        return self.eca(x)
+
+
+class NeckDWConvECA(nn.Module):
+    """Refine a neck feature with residual depthwise convolution and channel attention."""
+
+    def __init__(self, c1: int, c2: int, kernel_size: int = 3):
+        """Initialize the depthwise-convolution and ECA refinement block."""
+        super().__init__()
+        if c1 != c2:
+            raise ValueError(f"NeckDWConvECA requires matching input/output channels, got {c1} and {c2}")
+        self.dwconv = Conv(c1, c2, 3, 1, g=c1)
+        self.eca = ECA(c2, kernel_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Add locally refined, channel-recalibrated features to the input."""
+        return x + self.eca(self.dwconv(x))
 
 
 class ResCGAFFP2RDLEBackbone(ResCGAFFP2Backbone):

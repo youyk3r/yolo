@@ -58,6 +58,8 @@ from ultralytics.nn.modules import (
     Index,
     LRPCHead,
     MultiScaleDualInputBackbone,
+    NeckECA,
+    NeckDWConvECA,
     Pose,
     Pose26,
     RepC3,
@@ -1921,6 +1923,8 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
+            NeckECA,
+            NeckDWConvECA,
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
