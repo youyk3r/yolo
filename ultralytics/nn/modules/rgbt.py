@@ -17,6 +17,10 @@ __all__ = (
     "ResCGAFFMultiScaleBackbone",
     "NeckECA",
     "NeckDWConvECA",
+    "NeckP4P3Residual",
+    "NeckP4P3Weighted",
+    "NeckP4P3Learnable",
+    "NeckP3P2Residual",
     "ResCGAFFP2RDLEBackbone",
 )
 
@@ -414,6 +418,65 @@ class NeckDWConvECA(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Add locally refined, channel-recalibrated features to the input."""
         return x + self.eca(self.dwconv(x))
+
+
+class NeckP4P3Residual(nn.Module):
+    """Fuse P4 and P3 neck features while preserving a projected P3 shortcut."""
+
+    def __init__(self, c_concat: int, c_p3: int, c2: int):
+        super().__init__()
+        self.fuse = C2f(c_concat, c2)
+        self.shortcut = Conv(c_p3, c2, 1, 1)
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse concatenated P4/P3 features and add the projected P3 feature."""
+        fused, p3 = x
+        return self.fuse(fused) + self.shortcut(p3)
+
+
+class NeckP4P3Weighted(nn.Module):
+    """Fuse aligned P4 and P3 features with fixed P3/P4 weights."""
+
+    def __init__(self, c_p4: int, c_p3: int, c2: int, p3_weight: float = 0.75):
+        super().__init__()
+        self.p3 = Conv(c_p3, c2, 1, 1)
+        self.p4 = Conv(c_p4, c2, 1, 1)
+        self.p3_weight = p3_weight
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Project both scales and combine them using fixed complementary weights."""
+        p4, p3 = x
+        return self.p3_weight * self.p3(p3) + (1 - self.p3_weight) * self.p4(p4)
+
+
+class NeckP4P3Learnable(nn.Module):
+    """Fuse aligned P4 and P3 features with trainable scale weights."""
+
+    def __init__(self, c_p4: int, c_p3: int, c2: int):
+        super().__init__()
+        self.p3 = Conv(c_p3, c2, 1, 1)
+        self.p4 = Conv(c_p4, c2, 1, 1)
+        self.weights = nn.Parameter(torch.ones(2))
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Project both scales and combine them using normalized trainable weights."""
+        p4, p3 = x
+        weights = self.weights.softmax(dim=0)
+        return weights[1] * self.p3(p3) + weights[0] * self.p4(p4)
+
+
+class NeckP3P2Residual(nn.Module):
+    """Fuse P3 and P2 neck features while preserving a projected P2 shortcut."""
+
+    def __init__(self, c_concat: int, c_p2: int, c2: int):
+        super().__init__()
+        self.fuse = C2f(c_concat, c2)
+        self.shortcut = Conv(c_p2, c2, 1, 1)
+
+    def forward(self, x: list[torch.Tensor]) -> torch.Tensor:
+        """Fuse concatenated P3/P2 features and add the projected P2 feature."""
+        fused, p2 = x
+        return self.fuse(fused) + self.shortcut(p2)
 
 
 class ResCGAFFP2RDLEBackbone(ResCGAFFP2Backbone):

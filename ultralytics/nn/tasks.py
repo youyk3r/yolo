@@ -60,6 +60,10 @@ from ultralytics.nn.modules import (
     MultiScaleDualInputBackbone,
     NeckECA,
     NeckDWConvECA,
+    NeckP4P3Residual,
+    NeckP4P3Weighted,
+    NeckP4P3Learnable,
+    NeckP3P2Residual,
     Pose,
     Pose26,
     RepC3,
@@ -1986,6 +1990,9 @@ def parse_model(d, ch, verbose=True):
                 legacy = False
         elif m is AIFI:
             args = [ch[f], *args]
+        elif m in frozenset({NeckP4P3Residual, NeckP4P3Weighted, NeckP4P3Learnable, NeckP3P2Residual}):
+            c2 = args[0]
+            args = [*([ch[x] for x in f]), *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
