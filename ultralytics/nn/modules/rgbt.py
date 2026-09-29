@@ -77,12 +77,24 @@ class ResidualAFF(nn.Module):
 class ConcatGatedAFF(nn.Module):
     """Concat-gated AFF that predicts modality weights from RGB/IR contrast."""
 
-    def __init__(self, channels: int, out_channels: int, reduction: int = 4, attention_mode: str = "ours_ours"):
+    def __init__(
+        self,
+        channels: int,
+        out_channels: int,
+        reduction: int = 4,
+        attention_mode: str = "ours_ours",
+        weight_mode: str = "complement",
+    ):
         """Initialize concat-gated AFF with local/global attention and a concat projection."""
         super().__init__()
         if attention_mode not in {"rfc_rfc", "ours_ours", "rfc_ours", "ours_rfc"}:
             raise ValueError(f"attention_mode must be one of rfc_rfc, ours_ours, rfc_ours, ours_rfc, got {attention_mode!r}")
+        if weight_mode not in {"complement", "softmax", "independent", "norm_independent"}:
+            raise ValueError(
+                f"weight_mode must be one of complement, softmax, independent, norm_independent, got {weight_mode!r}"
+            )
         self.attention_mode = attention_mode
+        self.weight_mode = weight_mode
         hidden_channels = max(channels // reduction, 8)
         gate_channels = channels * 2
         self.local_att = nn.Sequential(
@@ -102,37 +114,70 @@ class ConcatGatedAFF(nn.Module):
             nn.Conv2d(hidden_channels, channels, 1, bias=True),
         )
         self.rfc_spatial = nn.Conv2d(2, 1, 7, padding=3, bias=False)
+        self.modality_local = nn.Sequential(
+            nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, channels * 2, 1, bias=True),
+        )
+        self.modality_global = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(gate_channels, hidden_channels, 1, bias=True),
+            nn.SiLU(inplace=True),
+            nn.Conv2d(hidden_channels, channels * 2, 1, bias=True),
+        )
         self.act = nn.Sigmoid()
         self.project = Conv(gate_channels, out_channels, 1, 1)
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
         """Predict modality weights from concatenated RGB/IR features, then project both streams."""
         mixed = torch.cat((rgb, ir), dim=1)
-        if self.attention_mode == "ours_ours":
-            weights = self.act(self.local_att(mixed) + self.global_att(mixed))
+        if self.weight_mode == "complement":
+            if self.attention_mode == "ours_ours":
+                weights = self.act(self.local_att(mixed) + self.global_att(mixed))
+            else:
+                channel_pool = torch.cat((mixed.mean(dim=1, keepdim=True), mixed.amax(dim=1, keepdim=True)), dim=1)
+                rfc_spatial = self.rfc_spatial(channel_pool)
+                rfc_channel = self.rfc_channel(mixed.mean(dim=(2, 3), keepdim=True)) + self.rfc_channel(
+                    mixed.amax(dim=(2, 3), keepdim=True)
+                )
+                if self.attention_mode == "rfc_rfc":
+                    weights = self.act(rfc_channel) * self.act(rfc_spatial)
+                elif self.attention_mode == "rfc_ours":
+                    weights = self.act(rfc_channel + self.local_att(mixed))
+                else:  # ours_rfc
+                    weights = self.act(self.global_att(mixed)) * self.act(rfc_spatial)
+            rgb_weight, ir_weight = weights, 1.0 - weights
         else:
-            channel_pool = torch.cat((mixed.mean(dim=1, keepdim=True), mixed.amax(dim=1, keepdim=True)), dim=1)
-            rfc_spatial = self.rfc_spatial(channel_pool)
-            rfc_channel = self.rfc_channel(mixed.mean(dim=(2, 3), keepdim=True)) + self.rfc_channel(
-                mixed.amax(dim=(2, 3), keepdim=True)
-            )
-            if self.attention_mode == "rfc_rfc":
-                weights = self.act(rfc_channel) * self.act(rfc_spatial)
-            elif self.attention_mode == "rfc_ours":
-                weights = self.act(rfc_channel + self.local_att(mixed))
-            else:  # ours_rfc
-                weights = self.act(self.global_att(mixed)) * self.act(rfc_spatial)
-        return self.project(torch.cat((rgb * weights, ir * (1.0 - weights)), dim=1))
+            logits = self.modality_local(mixed) + self.modality_global(mixed)
+            logits = logits.reshape(logits.shape[0], 2, -1, logits.shape[2], logits.shape[3])
+            if self.weight_mode == "softmax":
+                modality_weights = torch.softmax(logits, dim=1)
+                rgb_weight, ir_weight = modality_weights[:, 0], modality_weights[:, 1]
+            else:
+                rgb_weight, ir_weight = torch.sigmoid(logits[:, 0]), torch.sigmoid(logits[:, 1])
+                if self.weight_mode == "norm_independent":
+                    total = rgb_weight + ir_weight + 1e-6
+                    rgb_weight = 2.0 * rgb_weight / total
+                    ir_weight = 2.0 * ir_weight / total
+        return self.project(torch.cat((rgb * rgb_weight, ir * ir_weight), dim=1))
 
 
 class ResidualConcatGatedAFF(nn.Module):
     """Residual concat-gated AFF fusion that preserves the baseline concat path."""
 
-    def __init__(self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1, attention_mode: str = "ours_ours"):
+    def __init__(
+        self,
+        channels: int,
+        out_channels: int,
+        reduction: int = 4,
+        alpha: float = 0.1,
+        attention_mode: str = "ours_ours",
+        weight_mode: str = "complement",
+    ):
         """Initialize a baseline fusion path plus a learnable concat-gated AFF residual."""
         super().__init__()
         self.base = Conv(channels * 2, out_channels, 1, 1)
-        self.aff = ConcatGatedAFF(channels, out_channels, reduction, attention_mode)
+        self.aff = ConcatGatedAFF(channels, out_channels, reduction, attention_mode, weight_mode)
         self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
@@ -216,6 +261,7 @@ class DualInputBackbone(nn.Module):
         residual_daff: bool = False,
         da_mode: str = "full",
         cgaff_attention: str = "ours_ours",
+        cgaff_weight: str = "complement",
     ):
         """Initialize the dual-branch backbone."""
         super().__init__()
@@ -235,7 +281,7 @@ class DualInputBackbone(nn.Module):
             )
         elif residual_cgaff:
             self.fuse = ResidualConcatGatedAFF(
-                branch_channels, p3_channels, aff_reduction, residual_alpha, cgaff_attention
+                branch_channels, p3_channels, aff_reduction, residual_alpha, cgaff_attention, cgaff_weight
             )
         elif residual_aff:
             self.fuse = ResidualAFF(branch_channels, p3_channels, aff_reduction, residual_alpha)
@@ -364,6 +410,7 @@ class MultiScaleDualInputBackbone(nn.Module):
         residual_alpha: float = 0.1,
         fusion_pattern: str = "RRR",
         cgaff_attention: str = "ours_ours",
+        cgaff_weight: str = "complement",
     ):
         """Initialize modality-specific stages and the requested P3/P4/P5 residual fusion pattern."""
         super().__init__()
@@ -389,23 +436,23 @@ class MultiScaleDualInputBackbone(nn.Module):
         # Each scale selects R=ResCGAFF, D=difference-aware, or C=consistency-aware residual fusion.
         self.fusion_pattern = fusion_pattern
         self.fuse_p3 = self._make_fusion(
-            fusion_pattern[0], branch_p3, p3_channels, aff_reduction, residual_alpha, cgaff_attention
+            fusion_pattern[0], branch_p3, p3_channels, aff_reduction, residual_alpha, cgaff_attention, cgaff_weight
         )
         self.fuse_p4 = self._make_fusion(
-            fusion_pattern[1], branch_p4, p4_channels, aff_reduction, residual_alpha, cgaff_attention
+            fusion_pattern[1], branch_p4, p4_channels, aff_reduction, residual_alpha, cgaff_attention, cgaff_weight
         )
         self.fuse_p5 = self._make_fusion(
-            fusion_pattern[2], branch_p5, p5_channels, aff_reduction, residual_alpha, cgaff_attention
+            fusion_pattern[2], branch_p5, p5_channels, aff_reduction, residual_alpha, cgaff_attention, cgaff_weight
         )
         self.sppf = SPPF(p5_channels, p5_channels, 5)
 
     @staticmethod
     def _make_fusion(
-        mode: str, channels: int, out_channels: int, reduction: int, alpha: float, attention_mode: str
+        mode: str, channels: int, out_channels: int, reduction: int, alpha: float, attention_mode: str, weight_mode: str
     ) -> nn.Module:
         """Build one scale's residual fusion module from its compact mode code."""
         if mode == "R":
-            return ResidualConcatGatedAFF(channels, out_channels, reduction, alpha, attention_mode)
+            return ResidualConcatGatedAFF(channels, out_channels, reduction, alpha, attention_mode, weight_mode)
         da_mode = "difference" if mode == "D" else "consistency"
         return ResidualDifferenceAwareAFF(channels, out_channels, reduction, alpha, da_mode)
 
