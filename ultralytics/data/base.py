@@ -263,7 +263,7 @@ class BaseDataset(Dataset):
                         im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
             elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
                 im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
-            
+
             # Only convert 2D (grayscale) to 3D if not multi-channel format
             # For 6-channel images from concatenated VIS-IR, skip this conversion
             if im.ndim == 2 and self.channels <= 3:
