@@ -9,7 +9,7 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import Conv
 
-__all__ = ("DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
+__all__ = ("BGF", "MFB", "DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
 
 
 def _make_modality_stem(channels: int) -> nn.Sequential:
@@ -128,9 +128,19 @@ class ConcatGatedAFF(nn.Module):
         self.act = nn.Sigmoid()
         self.project = Conv(gate_channels, out_channels, 1, 1)
 
-    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
-        """Predict modality weights from concatenated RGB/IR features, then project both streams."""
-        mixed = torch.cat((rgb, ir), dim=1)
+    def forward(self, Frgb: torch.Tensor, Fir: torch.Tensor) -> torch.Tensor:
+        """Fuse feature inputs with ``Fcat=[Frgb,Fir]`` and a learned modality gate.
+
+        The gate follows ``A=sigmoid(A_local(Fcat)+A_global(Fcat))``. The returned feature is
+        ``P([Frgb*A,Fir*(1-A)])`` for complementary weights, or the selected two-stream
+        weighting variant for other ``weight_mode`` values.
+        """
+        if Frgb.ndim != 4 or Fir.ndim != 4 or Frgb.shape != Fir.shape:
+            raise ValueError(
+                "ResCGAFF expects matching [B, C, H, W] Frgb/Fir tensors, "
+                f"got {tuple(Frgb.shape)} and {tuple(Fir.shape)}"
+            )
+        mixed = torch.cat((Frgb, Fir), dim=1)
         if self.weight_mode == "complement":
             if self.attention_mode == "ours_ours":
                 weights = self.act(self.local_att(mixed) + self.global_att(mixed))
@@ -159,7 +169,7 @@ class ConcatGatedAFF(nn.Module):
                     total = rgb_weight + ir_weight + 1e-6
                     rgb_weight = 2.0 * rgb_weight / total
                     ir_weight = 2.0 * ir_weight / total
-        return self.project(torch.cat((rgb * rgb_weight, ir * ir_weight), dim=1))
+        return self.project(torch.cat((Frgb * rgb_weight, Fir * ir_weight), dim=1))
 
 
 class ResidualConcatGatedAFF(nn.Module):
@@ -180,9 +190,89 @@ class ResidualConcatGatedAFF(nn.Module):
         self.aff = ConcatGatedAFF(channels, out_channels, reduction, attention_mode, weight_mode)
         self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
 
+    def forward(self, Frgb: torch.Tensor, Fir: torch.Tensor) -> torch.Tensor:
+        """Apply the ResCGAFF equation ``Fout=B([Frgb,Fir])+alpha*P([Frgb*A,Fir*(1-A)])``."""
+        if Frgb.ndim != 4 or Fir.ndim != 4 or Frgb.shape != Fir.shape:
+            raise ValueError(
+                "ResCGAFF expects matching [B, C, H, W] Frgb/Fir tensors, "
+                f"got {tuple(Frgb.shape)} and {tuple(Fir.shape)}"
+            )
+        return self.base(torch.cat((Frgb, Fir), dim=1)) + self.alpha * self.aff(Frgb, Fir)
+
+
+class BGF(nn.Module):
+    """Bilateral guided fusion base branch with sigmoid guidance and cross-modal residual updates."""
+
+    def __init__(self, channels: int, out_channels: int):
+        """Initialize BGF for two same-scale modality features."""
+        super().__init__()
+        self.rgb_conv = Conv(channels, channels, 3, 1)
+        self.ir_conv = Conv(channels, channels, 3, 1)
+        self.rgb_gate = nn.Sequential(Conv(channels, channels, 3, 1), nn.Sigmoid())
+        self.ir_gate = nn.Sequential(Conv(channels, channels, 3, 1), nn.Sigmoid())
+        self.rgb_add = Conv(channels, channels, 3, 1)
+        self.ir_add = Conv(channels, channels, 3, 1)
+        self.project = Conv(channels * 2, out_channels, 3, 1)
+
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
-        """Fuse with Cat + 1x1 Conv as the main path and concat-gated AFF as residual enhancement."""
-        return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
+        """Fuse modalities with independent gates, bilateral additions, and final refinement."""
+        if rgb.ndim != 4 or ir.ndim != 4 or rgb.shape != ir.shape:
+            raise ValueError(f"BGF expects matching [B, C, H, W] tensors, got {tuple(rgb.shape)} and {tuple(ir.shape)}")
+        rgb_m = self.rgb_conv(rgb) * self.rgb_gate(rgb)
+        ir_m = self.ir_conv(ir) * self.ir_gate(ir)
+        return self.project(torch.cat((rgb_m + self.rgb_add(ir), ir_m + self.ir_add(rgb)), dim=1))
+
+
+class MFB(nn.Module):
+    """Multi-modal factorized bilinear fusion base branch."""
+
+    def __init__(self, channels: int, out_channels: int):
+        """Initialize factorized cross-modal multiplicative fusion."""
+        super().__init__()
+        self.rgb_conv = Conv(channels, channels, 3, 1)
+        self.ir_conv = Conv(channels, channels, 3, 1)
+        self.rgb_factor = Conv(channels, channels, 3, 1)
+        self.ir_factor = Conv(channels, channels, 3, 1)
+        self.rgb_add = Conv(channels, channels, 3, 1)
+        self.ir_add = Conv(channels, channels, 3, 1)
+        self.project = Conv(channels * 2, out_channels, 3, 1)
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse modalities with factorized elementwise cross-modal interactions and refinement."""
+        if rgb.ndim != 4 or ir.ndim != 4 or rgb.shape != ir.shape:
+            raise ValueError(f"MFB expects matching [B, C, H, W] tensors, got {tuple(rgb.shape)} and {tuple(ir.shape)}")
+        rgb_m = self.rgb_conv(rgb) * self.ir_factor(ir) + self.rgb_add(rgb)
+        ir_m = self.ir_conv(ir) * self.rgb_factor(rgb) + self.ir_add(ir)
+        return self.project(torch.cat((rgb_m, ir_m), dim=1))
+
+
+class ESeriesFusion(nn.Module):
+    """Select an E-series base branch and optionally add the unchanged current attention branch."""
+
+    def __init__(
+        self, channels: int, out_channels: int, base_branch: str = "cat", use_attention: bool = True,
+        reduction: int = 4, alpha: float = 0.1,
+    ):
+        """Initialize one E0-E5 P3 fusion configuration."""
+        super().__init__()
+        if base_branch == "cat":
+            self.base = Conv(channels * 2, out_channels, 1, 1)
+        elif base_branch == "bgf":
+            self.base = BGF(channels, out_channels)
+        elif base_branch == "mfb":
+            self.base = MFB(channels, out_channels)
+        else:
+            raise ValueError(f"base_branch must be cat, bgf, or mfb, got {base_branch!r}")
+        self.base_branch = base_branch
+        self.use_attention = use_attention
+        if use_attention:
+            self.attention = ConcatGatedAFF(channels, out_channels, reduction, "ours_ours", "complement")
+            self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Return base fusion, optionally augmented by the current complementary attention branch."""
+        base = self.base(torch.cat((rgb, ir), dim=1)) if self.base_branch == "cat" else self.base(rgb, ir)
+        return base + self.alpha * self.attention(rgb, ir) if self.use_attention else base
 
 
 class DifferenceAwareAFF(nn.Module):
@@ -343,6 +433,8 @@ class ResCGAFFP2Backbone(nn.Module):
         p5_channels: int = 256,
         aff_reduction: int = 4,
         residual_alpha: float = 0.1,
+        base_branch: str = "cat",
+        use_attention: bool = True,
     ):
         """Initialize separate RGB/IR P2-P3 stages followed by the shared P4-P5 backbone."""
         super().__init__()
@@ -369,10 +461,15 @@ class ResCGAFFP2Backbone(nn.Module):
         )
         self.fuse_p2 = Conv(p2_channels, p2_channels, 1, 1)
 
-        # P3 keeps the original modality-specific stage and Residual Concat-Gated AFF fusion.
+        # P3 is the controlled E-series fusion point; P2 and the detection head stay fixed.
         self.rgb_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
         self.ir_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
-        self.fuse_p3 = ResidualConcatGatedAFF(branch_p3, p3_channels, aff_reduction, residual_alpha)
+        # Preserve the original E1 module/state-dict layout so its completed checkpoint remains reusable.
+        self.fuse_p3 = (
+            ResidualConcatGatedAFF(branch_p3, p3_channels, aff_reduction, residual_alpha)
+            if base_branch == "cat" and use_attention
+            else ESeriesFusion(branch_p3, p3_channels, base_branch, use_attention, aff_reduction, residual_alpha)
+        )
 
         self.p4 = _make_modality_stage(p3_channels, p4_channels, repeats=2)
         self.p5 = nn.Sequential(
