@@ -1,6 +1,6 @@
-# Ultralytics YOLOv8n RGB/IR model with ResCGAFF fusion at P3/P4/P5 (R-R-R).
+# YOLOv8n RGB/IR model with dual-stream ResCGAFF fusion at P3/P4/P5 (R-R-R).
 
-nc: 80
+nc: 6
 channels: 6
 scale: n
 
