@@ -12,12 +12,14 @@ import torch.nn as nn
 __all__ = (
     "CBAM",
     "ChannelAttention",
+    "CoordinateAttention",
     "Concat",
     "Conv",
     "Conv2",
     "ConvTranspose",
     "DWConv",
     "DWConvTranspose2d",
+    "EMAAttention",
     "Focus",
     "GhostConv",
     "Index",
@@ -611,6 +613,62 @@ class CBAM(nn.Module):
             (torch.Tensor): Attended output tensor.
         """
         return self.spatial_attention(self.channel_attention(x))
+
+
+class EMAAttention(nn.Module):
+    """Efficient multi-scale attention with grouped cross-spatial feature aggregation."""
+
+    def __init__(self, channels: int, groups: int = 8):
+        """Initialize equal channel groups and shared directional/local feature branches."""
+        super().__init__()
+        if groups < 1 or channels % groups:
+            raise ValueError(f"EMAAttention channels ({channels}) must be divisible by groups ({groups})")
+        self.groups = groups
+        grouped_channels = channels // groups
+        self.conv1 = nn.Conv2d(grouped_channels, grouped_channels, 1)
+        self.conv3 = nn.Conv2d(grouped_channels, grouped_channels, 3, padding=1)
+        self.norm = nn.GroupNorm(grouped_channels, grouped_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Reweight each channel group using directional gates and cross-spatial correlations."""
+        b, c, h, w = x.shape
+        grouped = x.reshape(b * self.groups, c // self.groups, h, w)
+        pooled_h = grouped.mean(dim=3, keepdim=True)
+        pooled_w = grouped.mean(dim=2, keepdim=True).permute(0, 1, 3, 2)
+        gates_h, gates_w = self.conv1(torch.cat((pooled_h, pooled_w), dim=2)).split((h, w), dim=2)
+        directional = self.norm(grouped * gates_h.sigmoid() * gates_w.permute(0, 1, 3, 2).sigmoid())
+        local = self.conv3(grouped)
+        directional_weights = directional.mean(dim=(2, 3)).softmax(dim=1).unsqueeze(1)
+        local_weights = local.mean(dim=(2, 3)).softmax(dim=1).unsqueeze(1)
+        weights = directional_weights @ local.flatten(2) + local_weights @ directional.flatten(2)
+        return (grouped * weights.reshape(b * self.groups, 1, h, w).sigmoid()).reshape(b, c, h, w)
+
+
+class CoordinateAttention(nn.Module):
+    """Coordinate attention for lightweight channel and directional-spatial recalibration."""
+
+    def __init__(self, c1: int, c2=None, reduction: int = 32) -> None:
+        """Initialize coordinate attention, preserving the input shape."""
+        super().__init__()
+        if c2 is not None and c1 != c2:
+            raise ValueError(f"CoordinateAttention requires matching input/output channels, got {c1} and {c2}")
+        hidden = max(8, c1 // reduction)
+        self.conv1 = nn.Conv2d(c1, hidden, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(hidden)
+        self.act = nn.Hardswish()
+        self.conv_h = nn.Conv2d(hidden, c1, 1, bias=True)
+        self.conv_w = nn.Conv2d(hidden, c1, 1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply separate height and width attention maps to ``x``."""
+        identity = x
+        h, w = x.shape[-2:]
+        x_h = x.mean(dim=3, keepdim=True)
+        x_w = x.mean(dim=2, keepdim=True).permute(0, 1, 3, 2)
+        y = self.act(self.bn1(self.conv1(torch.cat((x_h, x_w), dim=2))))
+        a_h, a_w = torch.split(y, [h, w], dim=2)
+        a_w = a_w.permute(0, 1, 3, 2)
+        return identity * self.conv_h(a_h).sigmoid() * self.conv_w(a_w).sigmoid()
 
 
 class Concat(nn.Module):

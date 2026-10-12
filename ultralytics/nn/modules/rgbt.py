@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from .block import C2f, SPPF
-from .conv import Conv
+from .conv import CBAM, Conv, CoordinateAttention, EMAAttention
 
 __all__ = ("BGF", "MFB", "DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
 
@@ -198,6 +198,20 @@ class ResidualConcatGatedAFF(nn.Module):
                 f"got {tuple(Frgb.shape)} and {tuple(Fir.shape)}"
             )
         return self.base(torch.cat((Frgb, Fir), dim=1)) + self.alpha * self.aff(Frgb, Fir)
+
+
+class PostFusionAttention(nn.Module):
+    """Apply attention after a complete two-input fusion, including its residual addition."""
+
+    def __init__(self, fusion: nn.Module, attention: nn.Module):
+        """Compose an existing fusion module with output attention."""
+        super().__init__()
+        self.fusion = fusion
+        self.attention = attention
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Refine the fused feature before it feeds the neck and shared backbone."""
+        return self.attention(self.fusion(rgb, ir))
 
 
 class BGF(nn.Module):
@@ -423,7 +437,7 @@ class DualInputBackbone(nn.Module):
 
 
 class ResCGAFFP2Backbone(nn.Module):
-    """Preserve P2 features before ResCGAFF fusion at P3 for four-scale detection."""
+    """Fuse RGB/IR P2-P3 features with optional P2 ResCGAFF and post-fusion P3 attention."""
 
     def __init__(
         self,
@@ -435,6 +449,8 @@ class ResCGAFFP2Backbone(nn.Module):
         residual_alpha: float = 0.1,
         base_branch: str = "cat",
         use_attention: bool = True,
+        p2_rescgaff: bool = False,
+        p3_attention: str = "none",
     ):
         """Initialize separate RGB/IR P2-P3 stages followed by the shared P4-P5 backbone."""
         super().__init__()
@@ -448,7 +464,6 @@ class ResCGAFFP2Backbone(nn.Module):
         if stem_channels < 8:
             raise ValueError("p2_channels must be at least 32")
 
-        # P2 retains shallow spatial detail from both modalities without competitive attention filtering.
         self.rgb_p2 = nn.Sequential(
             Conv(3, stem_channels, 3, 2),
             Conv(stem_channels, branch_p2, 3, 2),
@@ -459,9 +474,12 @@ class ResCGAFFP2Backbone(nn.Module):
             Conv(stem_channels, branch_p2, 3, 2),
             C2f(branch_p2, branch_p2, n=1, shortcut=True),
         )
-        self.fuse_p2 = Conv(p2_channels, p2_channels, 1, 1)
+        self.fuse_p2 = (
+            ResidualConcatGatedAFF(branch_p2, p2_channels, aff_reduction, residual_alpha)
+            if p2_rescgaff
+            else Conv(p2_channels, p2_channels, 1, 1)
+        )
 
-        # P3 is the controlled E-series fusion point; P2 and the detection head stay fixed.
         self.rgb_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
         self.ir_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
         # Preserve the original E1 module/state-dict layout so its completed checkpoint remains reusable.
@@ -470,6 +488,11 @@ class ResCGAFFP2Backbone(nn.Module):
             if base_branch == "cat" and use_attention
             else ESeriesFusion(branch_p3, p3_channels, base_branch, use_attention, aff_reduction, residual_alpha)
         )
+        attention_modules = {"cbam": CBAM, "ema": EMAAttention, "ca": CoordinateAttention}
+        if p3_attention not in ("none", *attention_modules):
+            raise ValueError(f"Unknown P3 attention {p3_attention!r}; choose from {tuple(attention_modules)}")
+        if p3_attention != "none":
+            self.fuse_p3 = PostFusionAttention(self.fuse_p3, attention_modules[p3_attention](p3_channels))
 
         self.p4 = _make_modality_stage(p3_channels, p4_channels, repeats=2)
         self.p5 = nn.Sequential(
@@ -485,7 +508,11 @@ class ResCGAFFP2Backbone(nn.Module):
 
         rgb_p2 = self.rgb_p2(x[:, :3])
         ir_p2 = self.ir_p2(x[:, 3:6])
-        p2 = self.fuse_p2(torch.cat((rgb_p2, ir_p2), dim=1))
+        p2 = (
+            self.fuse_p2(rgb_p2, ir_p2)
+            if isinstance(self.fuse_p2, ResidualConcatGatedAFF)
+            else self.fuse_p2(torch.cat((rgb_p2, ir_p2), dim=1))
+        )
 
         rgb_p3 = self.rgb_p3(rgb_p2)
         ir_p3 = self.ir_p3(ir_p2)
