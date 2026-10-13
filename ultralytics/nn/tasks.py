@@ -38,6 +38,7 @@ from ultralytics.nn.modules import (
     C3Ghost,
     C3k2,
     C3x,
+    CBAM,
     CBFuse,
     CBLinear,
     Classify,
@@ -47,6 +48,7 @@ from ultralytics.nn.modules import (
     ConvTranspose,
     CoordinateAttention,
     ECAttention,
+    EMAAttention,
     Detect,
     DWConv,
     DWConvTranspose2d,
@@ -1960,7 +1962,10 @@ def parse_model(d, ch, verbose=True):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        if m in base_modules:
+        if m in {CBAM, EMAAttention, ECAttention}:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m in base_modules:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 != nc (e.g., Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
