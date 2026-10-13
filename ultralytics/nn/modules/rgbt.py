@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from .block import C2f, SPPF
-from .conv import CBAM, Conv, CoordinateAttention, EMAAttention
+from .conv import CBAM, Conv, CoordinateAttention, ECAttention, EMAAttention
 
 __all__ = ("BGF", "MFB", "DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
 
@@ -488,7 +488,7 @@ class ResCGAFFP2Backbone(nn.Module):
             if base_branch == "cat" and use_attention
             else ESeriesFusion(branch_p3, p3_channels, base_branch, use_attention, aff_reduction, residual_alpha)
         )
-        attention_modules = {"cbam": CBAM, "ema": EMAAttention, "ca": CoordinateAttention}
+        attention_modules = {"cbam": CBAM, "ema": EMAAttention, "ca": CoordinateAttention, "eca": ECAttention}
         if p3_attention not in ("none", *attention_modules):
             raise ValueError(f"Unknown P3 attention {p3_attention!r}; choose from {tuple(attention_modules)}")
         if p3_attention != "none":

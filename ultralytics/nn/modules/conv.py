@@ -19,6 +19,7 @@ __all__ = (
     "ConvTranspose",
     "DWConv",
     "DWConvTranspose2d",
+    "ECAttention",
     "EMAAttention",
     "Focus",
     "GhostConv",
@@ -642,6 +643,24 @@ class EMAAttention(nn.Module):
         local_weights = local.mean(dim=(2, 3)).softmax(dim=1).unsqueeze(1)
         weights = directional_weights @ local.flatten(2) + local_weights @ directional.flatten(2)
         return (grouped * weights.reshape(b * self.groups, 1, h, w).sigmoid()).reshape(b, c, h, w)
+
+
+class ECAttention(nn.Module):
+    """Efficient channel attention using local cross-channel interaction."""
+
+    def __init__(self, channels: int, gamma: float = 2.0, bias: float = 1.0):
+        """Initialize the adaptive odd-sized 1D convolution over pooled channel descriptors."""
+        super().__init__()
+        kernel_size = int(abs((math.log2(channels) + bias) / gamma))
+        kernel_size = kernel_size if kernel_size % 2 else kernel_size + 1
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.conv = nn.Conv1d(1, 1, kernel_size, padding=kernel_size // 2, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Reweight channels from locally mixed global average descriptors."""
+        weights = self.pool(x).squeeze(-1).transpose(-1, -2)
+        weights = self.conv(weights).transpose(-1, -2).unsqueeze(-1).sigmoid()
+        return x * weights
 
 
 class CoordinateAttention(nn.Module):
