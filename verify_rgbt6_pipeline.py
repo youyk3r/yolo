@@ -18,7 +18,6 @@ import argparse
 import sys
 from pathlib import Path
 
-
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 
@@ -27,7 +26,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vis-dir", type=Path, required=True, help="Directory containing visible/RGB images.")
     parser.add_argument("--ir-dir", type=Path, required=True, help="Directory containing infrared images.")
     parser.add_argument("--output-dir", type=Path, required=True, help="Directory to save fused .npy/.npz files.")
-    parser.add_argument("--model", default="yolov8n-6ch.yaml", help="YOLO model yaml/pt path configured for 6 channels.")
+    parser.add_argument(
+        "--model", default="yolov8n-6ch.yaml", help="YOLO model yaml/pt path configured for 6 channels."
+    )
     parser.add_argument("--target-size", type=int, nargs=2, metavar=("W", "H"), default=None, help="Resize size.")
     parser.add_argument("--limit", type=int, default=8, help="Max image pairs to verify. Use 0 for all pairs.")
     parser.add_argument("--save-mode", choices=("npy", "npz"), default="npy", help="Fused file format.")
@@ -95,10 +96,7 @@ def verify_saved_arrays(paths: list[Path]) -> list[np.ndarray]:
     for path in paths:
         arr = load_fused(path)
         arrays.append(arr)
-        print(
-            f"  OK {path.name}: shape={arr.shape}, dtype={arr.dtype}, "
-            f"min={arr.min()}, max={arr.max()}"
-        )
+        print(f"  OK {path.name}: shape={arr.shape}, dtype={arr.dtype}, min={arr.min()}, max={arr.max()}")
     return arrays
 
 
