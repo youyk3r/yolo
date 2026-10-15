@@ -9,7 +9,16 @@ import torch.nn as nn
 from .block import C2f, SPPF
 from .conv import CBAM, Conv, CoordinateAttention, ECAttention, EMAAttention
 
-__all__ = ("BGF", "MFB", "DualInputBackbone", "MultiScaleDualInputBackbone", "ResCGAFFP2Backbone")
+__all__ = (
+    "BGF",
+    "MFB",
+    "DualInputBackbone",
+    "MultiScaleDualInputBackbone",
+    "ResCGAFFP2Backbone",
+    "CMAEnhance",
+    "ASPPEnhance",
+    "NonLocalEnhance",
+)
 
 
 def _make_modality_stem(channels: int) -> nn.Sequential:
@@ -212,6 +221,130 @@ class PostFusionAttention(nn.Module):
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
         """Refine the fused feature before it feeds the neck and shared backbone."""
         return self.attention(self.fusion(rgb, ir))
+
+
+class CMAEnhance(nn.Module):
+    """Bidirectional cross-modal attention enhancement with a fixed output width."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4):
+        """Initialize cross-attention projections for RGB-to-IR and IR-to-RGB updates."""
+        super().__init__()
+        hidden = max(channels // reduction, 8)
+        self.rgb_q = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.ir_k = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.ir_v = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.ir_q = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.rgb_k = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.rgb_v = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.project = Conv(hidden * 2, out_channels, 1, 1)
+        self.scale = hidden**-0.5
+
+    def _cross(self, query, key, value):
+        """Compute scaled cross-attention over flattened spatial tokens."""
+        b, _, h, w = query.shape
+        q = query.flatten(2).transpose(1, 2)
+        k = key.flatten(2)
+        v = value.flatten(2).transpose(1, 2)
+        return torch.softmax(q @ k * self.scale, dim=-1) @ v, h, w
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Return projected bidirectional cross-modal attention features."""
+        rgb_to_ir, h, w = self._cross(self.rgb_q(rgb), self.ir_k(ir), self.ir_v(ir))
+        ir_to_rgb, _, _ = self._cross(self.ir_q(ir), self.rgb_k(rgb), self.rgb_v(rgb))
+        enhanced = torch.cat((rgb_to_ir.transpose(1, 2).reshape(rgb.shape[0], -1, h, w),
+                              ir_to_rgb.transpose(1, 2).reshape(rgb.shape[0], -1, h, w)), dim=1)
+        return self.project(enhanced)
+
+
+class ASPPEnhance(nn.Module):
+    """Apply shared-width atrous context branches independently to both modalities."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4):
+        """Initialize three atrous branches and a final projection."""
+        super().__init__()
+        hidden = max(out_channels // (3 * reduction), 8)
+        self.branches = nn.ModuleList(
+            nn.Sequential(nn.Conv2d(channels, hidden, 3, padding=dilation, dilation=dilation, bias=False),
+                          nn.BatchNorm2d(hidden), nn.SiLU(inplace=True))
+            for dilation in (1, 2, 3)
+        )
+        self.project = Conv(hidden * len(self.branches) * 2, out_channels, 1, 1)
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Return concatenated RGB/IR multi-dilation context projected to output width."""
+        features = [branch(stream) for stream in (rgb, ir) for branch in self.branches]
+        return self.project(torch.cat(features, dim=1))
+
+
+class NonLocalEnhance(nn.Module):
+    """Model long-range intra-modal dependencies with reduced query/key channels."""
+
+    def __init__(self, channels: int, out_channels: int, reduction: int = 4):
+        """Initialize independent RGB and IR non-local projections."""
+        super().__init__()
+        hidden = max(channels // reduction, 8)
+        self.q = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.k = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.v = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.project = Conv(hidden * 2, out_channels, 1, 1)
+        self.scale = hidden**-0.5
+
+    def _self(self, stream):
+        """Compute reduced non-local self-attention for one modality."""
+        b, _, h, w = stream.shape
+        q = self.q(stream).flatten(2).transpose(1, 2)
+        k = self.k(stream).flatten(2)
+        v = self.v(stream).flatten(2).transpose(1, 2)
+        return (torch.softmax(q @ k * self.scale, dim=-1) @ v).transpose(1, 2).reshape(b, -1, h, w)
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Return projected RGB/IR non-local responses."""
+        return self.project(torch.cat((self._self(rgb), self._self(ir)), dim=1))
+
+
+class DualStreamEnhanceFusion(nn.Module):
+    """Fuse two modality streams with a selectable enhancement and residual rule."""
+
+    def __init__(self, channels: int, out_channels: int, module: str = "none", fusion: str = "r0",
+                 reduction: int = 4, alpha: float = 0.1, gate_init: float = -2.0):
+        """Initialize a shared base path and one explicitly configured residual path."""
+        super().__init__()
+        module = module.lower()
+        fusion = fusion.lower()
+        modules = {"cma": CMAEnhance, "aspp": ASPPEnhance, "nonlocal": NonLocalEnhance}
+        if module not in ("none", *modules):
+            raise ValueError(f"Unknown enhancement module {module!r}")
+        if fusion not in {"r0", "r1", "r2", "r3", "r4", "r5"}:
+            raise ValueError(f"Unknown residual fusion {fusion!r}")
+        if module == "none" and fusion != "r0":
+            raise ValueError("An enhancement module is required for residual modes other than r0")
+        self.module_name, self.fusion_name = module, fusion
+        self.base = Conv(channels * 2, out_channels, 1, 1)
+        self.enhance = modules[module](channels, out_channels, reduction) if module != "none" else None
+        if fusion == "r3":
+            self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+        elif fusion == "r4":
+            self.channel_alpha = nn.Parameter(torch.full((1, out_channels, 1, 1), alpha))
+        elif fusion == "r5":
+            self.gate = nn.Conv2d(out_channels * 2, out_channels, 1)
+            nn.init.constant_(self.gate.bias, gate_init)
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Return the configured base plus residual enhancement output."""
+        base = self.base(torch.cat((rgb, ir), dim=1))
+        if self.enhance is None:
+            return base
+        enhanced = self.enhance(rgb, ir)
+        if self.fusion_name == "r1":
+            return base + enhanced
+        if self.fusion_name == "r2":
+            return base + 0.1 * enhanced
+        if self.fusion_name == "r3":
+            return base + self.alpha * enhanced
+        if self.fusion_name == "r4":
+            return base + self.channel_alpha * enhanced
+        gate = torch.sigmoid(self.gate(torch.cat((base, enhanced), dim=1)))
+        return base + gate * enhanced
 
 
 class BGF(nn.Module):
@@ -437,7 +570,7 @@ class DualInputBackbone(nn.Module):
 
 
 class ResCGAFFP2Backbone(nn.Module):
-    """Fuse RGB/IR P2-P3 features with optional P2 ResCGAFF and post-fusion P3 attention."""
+    """Fuse P2/P3 as before, then preserve RGB/IR streams for configurable P4/P5 enhancement."""
 
     def __init__(
         self,
@@ -451,8 +584,14 @@ class ResCGAFFP2Backbone(nn.Module):
         use_attention: bool = True,
         p2_rescgaff: bool = False,
         p3_attention: str = "none",
+        p4_enhance: str = "none",
+        p4_fusion: str = "r0",
+        p5_enhance: str = "none",
+        p5_fusion: str = "r0",
+        enhance_reduction: int = 4,
+        gate_init: float = -2.0,
     ):
-        """Initialize separate RGB/IR P2-P3 stages followed by the shared P4-P5 backbone."""
+        """Initialize separate RGB/IR P2-P3 stages and independent P4/P5 dual streams."""
         super().__init__()
         output_channels = (p2_channels, p3_channels, p4_channels, p5_channels)
         if any(channels < 16 or channels % 2 for channels in output_channels):
@@ -494,12 +633,23 @@ class ResCGAFFP2Backbone(nn.Module):
         if p3_attention != "none":
             self.fuse_p3 = PostFusionAttention(self.fuse_p3, attention_modules[p3_attention](p3_channels))
 
-        self.p4 = _make_modality_stage(p3_channels, p4_channels, repeats=2)
-        self.p5 = nn.Sequential(
+        self.rgb_p4 = _make_modality_stage(branch_p3, p4_channels, repeats=2)
+        self.ir_p4 = _make_modality_stage(branch_p3, p4_channels, repeats=2)
+        self.fuse_p4 = DualStreamEnhanceFusion(
+            p4_channels, p4_channels, p4_enhance, p4_fusion, enhance_reduction, residual_alpha, gate_init
+        )
+        self.rgb_p5 = nn.Sequential(
             Conv(p4_channels, p5_channels, 3, 2),
             C2f(p5_channels, p5_channels, n=1, shortcut=True),
-            SPPF(p5_channels, p5_channels, 5),
         )
+        self.ir_p5 = nn.Sequential(
+            Conv(p4_channels, p5_channels, 3, 2),
+            C2f(p5_channels, p5_channels, n=1, shortcut=True),
+        )
+        self.fuse_p5 = DualStreamEnhanceFusion(
+            p5_channels, p5_channels, p5_enhance, p5_fusion, enhance_reduction, residual_alpha, gate_init
+        )
+        self.sppf = SPPF(p5_channels, p5_channels, 5)
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
         """Return fused P2, P3, P4, and P5 feature maps."""
@@ -517,8 +667,12 @@ class ResCGAFFP2Backbone(nn.Module):
         rgb_p3 = self.rgb_p3(rgb_p2)
         ir_p3 = self.ir_p3(ir_p2)
         p3 = self.fuse_p3(rgb_p3, ir_p3)
-        p4 = self.p4(p3)
-        p5 = self.p5(p4)
+        rgb_p4 = self.rgb_p4(rgb_p3)
+        ir_p4 = self.ir_p4(ir_p3)
+        p4 = self.fuse_p4(rgb_p4, ir_p4)
+        rgb_p5 = self.rgb_p5(rgb_p4)
+        ir_p5 = self.ir_p5(ir_p4)
+        p5 = self.sppf(self.fuse_p5(rgb_p5, ir_p5))
         return [p2, p3, p4, p5]
 
 
