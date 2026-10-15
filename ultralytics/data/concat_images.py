@@ -4,10 +4,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
-from pathlib import Path
-from typing import Tuple
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.patches import imread
@@ -17,15 +17,15 @@ def concat_vis_ir(
     vis_path: str | Path,
     ir_path: str | Path,
     output_path: str | Path | None = None,
-    target_size: Tuple[int, int] | None = None,
+    target_size: tuple[int, int] | None = None,
     ir_to_3ch: bool = True,
     save_mode: str = "npy",
 ) -> np.ndarray:
     """Concatenate VIS (visible) and IR (infrared) images into a single multi-channel array.
 
-    This function reads a visible-spectrum image and an infrared image, aligns them to the same
-    dimensions, and concatenates them along the channel axis to create a 6-channel image
-    (3-channel VIS + 3-channel IR) or other combinations depending on input.
+    This function reads a visible-spectrum image and an infrared image, aligns them to the same dimensions, and
+    concatenates them along the channel axis to create a 6-channel image (3-channel VIS + 3-channel IR) or other
+    combinations depending on input.
 
     Args:
         vis_path (str | Path): Path to the visible-spectrum image.
@@ -35,12 +35,12 @@ def concat_vis_ir(
         target_size (Tuple[int, int] | None): Target (height, width) for resizing both images.
             If None, matches IR size to VIS size. Default: None.
         ir_to_3ch (bool): If True and IR is single-channel, replicate it to 3 channels.
-            If False, keep IR as single channel (result will be 4-channel). Default: True.
+        If False, keep IR as single channel (result will be 4-channel). Default: True.
         save_mode (str): Format to save: 'npy' for numpy binary, 'npz' for compressed. Default: 'npy'.
 
     Returns:
-        (np.ndarray): Concatenated image as (H, W, C) where C is typically 6 (vis 3ch + ir 3ch)
-            or 4 (vis 3ch + ir 1ch if ir_to_3ch=False).
+        (np.ndarray): Concatenated image as (H, W, C) where C is typically 6 (vis 3ch + ir 3ch) or 4 (vis 3ch + ir 1ch
+            if ir_to_3ch=False).
 
     Raises:
         FileNotFoundError: If vis_path or ir_path does not exist.
@@ -115,7 +115,7 @@ def batch_concat_vis_ir(
     vis_paths: list[str | Path],
     ir_paths: list[str | Path],
     output_dir: str | Path,
-    target_size: Tuple[int, int] | None = None,
+    target_size: tuple[int, int] | None = None,
     ir_to_3ch: bool = True,
     save_mode: str = "npy",
     name_suffix: str = "_fused",
