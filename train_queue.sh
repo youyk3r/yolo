@@ -17,7 +17,7 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # YOLO 项目目录
-PROJECT_DIR="$SCRIPT_DIR/yolo"
+PROJECT_DIR="$SCRIPT_DIR"
 
 # 数据集、模型、结果和日志路径
 DATA="$PROJECT_DIR/datasets/M3FD_6ch/rgbt6.yaml"
@@ -133,19 +133,19 @@ echo "Logs: $LOG_DIR"
 echo "============================================================"
 
 # GPU 0：P4 实验 E0-E3
-worker 0 \
-    E0 m3fd-p4-none-r0-e00.yaml \
-    E1 m3fd-p4-cma-r3-e01.yaml \
-    E2 m3fd-p4-aspp-r3-e02.yaml \
-    E3 m3fd-p4-nonlocal-r3-e03.yaml &
+worker 0 
+E00 stage1-E00-P4-no-enhancement-R0-P5-no-enhancement-R0.yaml 
+E01 stage1-E01-P4-CMA-R3-learnable-scalar-P5-no-enhancement-R0.yaml 
+E02 stage1-E02-P4-ASPP-R3-learnable-scalar-P5-no-enhancement-R0.yaml 
+E03 stage1-E03-P4-NonLocal-R3-learnable-scalar-P5-no-enhancement-R0.yaml & &
 PID0=$!
 
 # GPU 1：P5 实验 E4-E7
-worker 1 \
-    E4 m3fd-p5-none-r0-e04.yaml \
-    E5 m3fd-p5-cma-r3-e05.yaml \
-    E6 m3fd-p5-aspp-r3-e06.yaml \
-    E7 m3fd-p5-nonlocal-r3-e07.yaml &
+worker 1 
+E04 stage1-E04-P4-no-enhancement-R0-P5-no-enhancement-R0.yaml 
+E05 stage1-E05-P4-no-enhancement-R0-P5-CMA-R3-learnable-scalar.yaml 
+E06 stage1-E06-P4-no-enhancement-R0-P5-ASPP-R3-learnable-scalar.yaml 
+E07 stage1-E07-P4-no-enhancement-R0-P5-NonLocal-R3-learnable-scalar.yaml  &
 PID1=$!
 
 # 等待两条队列完成

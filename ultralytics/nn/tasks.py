@@ -1962,7 +1962,7 @@ def parse_model(d, ch, verbose=True):
             raise TypeError(emojis(f"ERROR ❌️ module '{m}' is not a permitted model layer under restricted loading."))
         for j, a in enumerate(args):
             if isinstance(a, str):
-                with contextlib.suppress(ValueError):
+                with contextlib.suppress(ValueError, SyntaxError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
         if m in {CBAM, EMAAttention, ECAttention}:
