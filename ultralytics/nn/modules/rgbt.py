@@ -192,12 +192,14 @@ class ResidualConcatGatedAFF(nn.Module):
         alpha: float = 0.1,
         attention_mode: str = "ours_ours",
         weight_mode: str = "complement",
+        residual_attention: nn.Module | None = None,
     ):
-        """Initialize a baseline fusion path plus a learnable concat-gated AFF residual."""
+        """Initialize ResCGAFF with optional attention inside its residual enhancement path."""
         super().__init__()
         self.base = Conv(channels * 2, out_channels, 1, 1)
         self.aff = ConcatGatedAFF(channels, out_channels, reduction, attention_mode, weight_mode)
         self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+        self.residual_attention = residual_attention or nn.Identity()
 
     def forward(self, Frgb: torch.Tensor, Fir: torch.Tensor) -> torch.Tensor:
         """Apply the ResCGAFF equation ``Fout=B([Frgb,Fir])+alpha*P([Frgb*A,Fir*(1-A)])``."""
@@ -206,7 +208,8 @@ class ResidualConcatGatedAFF(nn.Module):
                 "ResCGAFF expects matching [B, C, H, W] Frgb/Fir tensors, "
                 f"got {tuple(Frgb.shape)} and {tuple(Fir.shape)}"
             )
-        return self.base(torch.cat((Frgb, Fir), dim=1)) + self.alpha * self.aff(Frgb, Fir)
+        residual = self.residual_attention(self.aff(Frgb, Fir))
+        return self.base(torch.cat((Frgb, Fir), dim=1)) + self.alpha * residual
 
 
 class PostFusionAttention(nn.Module):
@@ -621,17 +624,20 @@ class ResCGAFFP2Backbone(nn.Module):
 
         self.rgb_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
         self.ir_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
-        # Preserve the original E1 module/state-dict layout so its completed checkpoint remains reusable.
-        self.fuse_p3 = (
-            ResidualConcatGatedAFF(branch_p3, p3_channels, aff_reduction, residual_alpha)
-            if base_branch == "cat" and use_attention
-            else ESeriesFusion(branch_p3, p3_channels, base_branch, use_attention, aff_reduction, residual_alpha)
-        )
         attention_modules = {"cbam": CBAM, "ema": EMAAttention, "ca": CoordinateAttention, "eca": ECAttention}
         if p3_attention not in ("none", *attention_modules):
             raise ValueError(f"Unknown P3 attention {p3_attention!r}; choose from {tuple(attention_modules)}")
-        if p3_attention != "none":
-            self.fuse_p3 = PostFusionAttention(self.fuse_p3, attention_modules[p3_attention](p3_channels))
+        if base_branch == "cat" and use_attention:
+            residual_attention = (
+                attention_modules[p3_attention](p3_channels) if p3_attention != "none" else None
+            )
+            self.fuse_p3 = ResidualConcatGatedAFF(
+                branch_p3, p3_channels, aff_reduction, residual_alpha, residual_attention=residual_attention
+            )
+        else:
+            self.fuse_p3 = ESeriesFusion(branch_p3, p3_channels, base_branch, use_attention, aff_reduction, residual_alpha)
+            if p3_attention != "none":
+                self.fuse_p3 = PostFusionAttention(self.fuse_p3, attention_modules[p3_attention](p3_channels))
 
         self.rgb_p4 = _make_modality_stage(branch_p3, p4_channels, repeats=2)
         self.ir_p4 = _make_modality_stage(branch_p3, p4_channels, repeats=2)
