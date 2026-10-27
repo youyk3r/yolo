@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 
 from .block import C2f, SPPF
-from .conv import CBAM, Conv, CoordinateAttention, ECAttention, EMAAttention
+from .conv import CBAM, Conv, CoordinateAttention, DWConv, ECAttention, EMAAttention
 
 __all__ = (
     "BGF",
@@ -481,6 +481,44 @@ class ResidualDifferenceAwareAFF(nn.Module):
         return self.base(torch.cat((rgb, ir), dim=1)) + self.alpha * self.aff(rgb, ir)
 
 
+class P2DifferenceFusion(nn.Module):
+    """Add a configurable RGB/IR difference residual to the P2 concat baseline."""
+
+    def __init__(
+        self, channels: int, out_channels: int, reduction: int = 4, alpha: float = 0.1, mode: str = "baseline"
+    ):
+        """Initialize a P2 difference branch with optional base-feature context and gating."""
+        super().__init__()
+        if mode not in {"baseline", "difference", "base_difference", "base_difference_gate"}:
+            raise ValueError(
+                "P2 difference mode must be one of baseline, difference, base_difference, base_difference_gate, "
+                f"got {mode!r}"
+            )
+        self.mode = mode
+        self.base = Conv(channels * 2, out_channels, 1, 1)
+        self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+        if mode != "baseline":
+            branch_channels = channels if mode == "difference" else channels + out_channels
+            self.difference = nn.Sequential(
+                DWConv(branch_channels, branch_channels, 3, 1),
+                Conv(branch_channels, out_channels, 1, 1),
+            )
+        if mode == "base_difference_gate":
+            self.gate = nn.Sequential(Conv(out_channels * 2, out_channels, 1, 1), nn.Sigmoid())
+
+    def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
+        """Fuse P2 streams with an optional explicit difference residual."""
+        base = self.base(torch.cat((rgb, ir), dim=1))
+        if self.mode == "baseline":
+            return base
+        difference = torch.abs(rgb - ir)
+        branch_input = difference if self.mode == "difference" else torch.cat((base, difference), dim=1)
+        enhanced = self.difference(branch_input)
+        if self.mode == "base_difference_gate":
+            enhanced = self.gate(torch.cat((base, enhanced), dim=1)) * enhanced
+        return base + self.alpha * enhanced
+
+
 class DualInputBackbone(nn.Module):
     """Extract multi-scale features from separate RGB and infrared branches.
 
@@ -593,6 +631,7 @@ class ResCGAFFP2Backbone(nn.Module):
         p5_fusion: str = "r0",
         enhance_reduction: int = 4,
         gate_init: float = -2.0,
+        p2_mode: str = "baseline",
     ):
         """Initialize separate RGB/IR P2-P3 stages and independent P4/P5 dual streams."""
         super().__init__()
@@ -619,7 +658,11 @@ class ResCGAFFP2Backbone(nn.Module):
         self.fuse_p2 = (
             ResidualConcatGatedAFF(branch_p2, p2_channels, aff_reduction, residual_alpha)
             if p2_rescgaff
-            else Conv(p2_channels, p2_channels, 1, 1)
+            else (
+                Conv(p2_channels, p2_channels, 1, 1)
+                if p2_mode == "baseline"
+                else P2DifferenceFusion(branch_p2, p2_channels, aff_reduction, residual_alpha, p2_mode)
+            )
         )
 
         self.rgb_p3 = _make_modality_stage(branch_p2, branch_p3, repeats=1)
@@ -666,7 +709,7 @@ class ResCGAFFP2Backbone(nn.Module):
         ir_p2 = self.ir_p2(x[:, 3:6])
         p2 = (
             self.fuse_p2(rgb_p2, ir_p2)
-            if isinstance(self.fuse_p2, ResidualConcatGatedAFF)
+            if isinstance(self.fuse_p2, (ResidualConcatGatedAFF, P2DifferenceFusion))
             else self.fuse_p2(torch.cat((rgb_p2, ir_p2), dim=1))
         )
 
