@@ -4,9 +4,9 @@
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 
-from .block import C2f, SPPF
+from .block import SPPF, C2f
 from .conv import Conv
 
 __all__ = ("DualInputBackbone",)
