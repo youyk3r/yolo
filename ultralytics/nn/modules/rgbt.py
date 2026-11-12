@@ -193,13 +193,15 @@ class ResidualConcatGatedAFF(nn.Module):
         attention_mode: str = "ours_ours",
         weight_mode: str = "complement",
         residual_attention: nn.Module | None = None,
+        fusion: str = "r3",
+        gate_init: float = -2.0,
     ):
         """Initialize ResCGAFF with optional attention inside its residual enhancement path."""
         super().__init__()
         self.base = Conv(channels * 2, out_channels, 1, 1)
         self.aff = ConcatGatedAFF(channels, out_channels, reduction, attention_mode, weight_mode)
-        self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
         self.residual_attention = residual_attention or nn.Identity()
+        _configure_residual_fusion(self, fusion, out_channels, alpha, gate_init)
 
     def forward(self, Frgb: torch.Tensor, Fir: torch.Tensor) -> torch.Tensor:
         """Apply the ResCGAFF equation ``Fout=B([Frgb,Fir])+alpha*P([Frgb*A,Fir*(1-A)])``."""
@@ -209,7 +211,7 @@ class ResidualConcatGatedAFF(nn.Module):
                 f"got {tuple(Frgb.shape)} and {tuple(Fir.shape)}"
             )
         residual = self.residual_attention(self.aff(Frgb, Fir))
-        return self.base(torch.cat((Frgb, Fir), dim=1)) + self.alpha * residual
+        return _apply_residual_fusion(self, self.base(torch.cat((Frgb, Fir), dim=1)), residual)
 
 
 class PostFusionAttention(nn.Module):
@@ -305,6 +307,35 @@ class NonLocalEnhance(nn.Module):
         return self.project(torch.cat((self._self(rgb), self._self(ir)), dim=1))
 
 
+def _configure_residual_fusion(module: nn.Module, fusion: str, channels: int, alpha: float, gate_init: float) -> None:
+    """Configure an R1-R5 residual injection rule on a fusion module."""
+    fusion = fusion.lower()
+    if fusion not in {"r1", "r2", "r3", "r4", "r5"}:
+        raise ValueError(f"Unknown residual fusion {fusion!r}")
+    module.fusion_name = fusion
+    if fusion == "r3":
+        module.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
+    elif fusion == "r4":
+        module.channel_alpha = nn.Parameter(torch.full((1, channels, 1, 1), alpha))
+    elif fusion == "r5":
+        module.gate = nn.Conv2d(channels * 2, channels, 1)
+        nn.init.constant_(module.gate.bias, gate_init)
+
+
+def _apply_residual_fusion(module: nn.Module, base: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+    """Inject a residual tensor into its base tensor using the configured R1-R5 rule."""
+    if module.fusion_name == "r1":
+        return base + residual
+    if module.fusion_name == "r2":
+        return base + 0.1 * residual
+    if module.fusion_name == "r3":
+        return base + module.alpha * residual
+    if module.fusion_name == "r4":
+        return base + module.channel_alpha * residual
+    gate = torch.sigmoid(module.gate(torch.cat((base, residual), dim=1)))
+    return base + gate * residual
+
+
 class DualStreamEnhanceFusion(nn.Module):
     """Fuse two modality streams with a selectable enhancement and residual rule."""
 
@@ -321,33 +352,18 @@ class DualStreamEnhanceFusion(nn.Module):
             raise ValueError(f"Unknown residual fusion {fusion!r}")
         if module == "none" and fusion != "r0":
             raise ValueError("An enhancement module is required for residual modes other than r0")
-        self.module_name, self.fusion_name = module, fusion
+        self.module_name = module
         self.base = Conv(channels * 2, out_channels, 1, 1)
         self.enhance = modules[module](channels, out_channels, reduction) if module != "none" else None
-        if fusion == "r3":
-            self.alpha = nn.Parameter(torch.tensor(alpha, dtype=torch.float32))
-        elif fusion == "r4":
-            self.channel_alpha = nn.Parameter(torch.full((1, out_channels, 1, 1), alpha))
-        elif fusion == "r5":
-            self.gate = nn.Conv2d(out_channels * 2, out_channels, 1)
-            nn.init.constant_(self.gate.bias, gate_init)
+        if self.enhance is not None:
+            _configure_residual_fusion(self, fusion, out_channels, alpha, gate_init)
 
     def forward(self, rgb: torch.Tensor, ir: torch.Tensor) -> torch.Tensor:
         """Return the configured base plus residual enhancement output."""
         base = self.base(torch.cat((rgb, ir), dim=1))
         if self.enhance is None:
             return base
-        enhanced = self.enhance(rgb, ir)
-        if self.fusion_name == "r1":
-            return base + enhanced
-        if self.fusion_name == "r2":
-            return base + 0.1 * enhanced
-        if self.fusion_name == "r3":
-            return base + self.alpha * enhanced
-        if self.fusion_name == "r4":
-            return base + self.channel_alpha * enhanced
-        gate = torch.sigmoid(self.gate(torch.cat((base, enhanced), dim=1)))
-        return base + gate * enhanced
+        return _apply_residual_fusion(self, base, self.enhance(rgb, ir))
 
 
 class BGF(nn.Module):
@@ -632,6 +648,8 @@ class ResCGAFFP2Backbone(nn.Module):
         enhance_reduction: int = 4,
         gate_init: float = -2.0,
         p2_mode: str = "baseline",
+        p2_fusion: str = "r3",
+        p3_fusion: str = "r3",
     ):
         """Initialize separate RGB/IR P2-P3 stages and independent P4/P5 dual streams."""
         super().__init__()
@@ -656,7 +674,9 @@ class ResCGAFFP2Backbone(nn.Module):
             C2f(branch_p2, branch_p2, n=1, shortcut=True),
         )
         self.fuse_p2 = (
-            ResidualConcatGatedAFF(branch_p2, p2_channels, aff_reduction, residual_alpha)
+            ResidualConcatGatedAFF(
+                branch_p2, p2_channels, aff_reduction, residual_alpha, fusion=p2_fusion, gate_init=gate_init
+            )
             if p2_rescgaff
             else (
                 Conv(p2_channels, p2_channels, 1, 1)
@@ -675,7 +695,13 @@ class ResCGAFFP2Backbone(nn.Module):
                 attention_modules[p3_attention](p3_channels) if p3_attention != "none" else None
             )
             self.fuse_p3 = ResidualConcatGatedAFF(
-                branch_p3, p3_channels, aff_reduction, residual_alpha, residual_attention=residual_attention
+                branch_p3,
+                p3_channels,
+                aff_reduction,
+                residual_alpha,
+                residual_attention=residual_attention,
+                fusion=p3_fusion,
+                gate_init=gate_init,
             )
         else:
             self.fuse_p3 = ESeriesFusion(branch_p3, p3_channels, base_branch, use_attention, aff_reduction, residual_alpha)
